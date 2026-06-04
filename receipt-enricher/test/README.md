@@ -66,7 +66,7 @@ prints its contents, and each self-skips when its prerequisites are missing
 |--------|---------|-------|
 | 1. Vision model | `ANTHROPIC_API_KEY=sk-... npm run test:live:vision` | a vision API key |
 | 2. Offline Tesseract | `npm run test:live:tesseract` | reachable CDN for first-run data |
-| 3. Full stack | `npm run test:live:stack` | `docker/podman compose up -d` running |
+| 3. Full stack | `npm run test:live:stack` | a running stack (`podman-compose up -d`, or `docker compose up -d`) |
 | 4. Sample corpus | `ANTHROPIC_API_KEY=sk-... npm run test:live:samples` | a vision API key |
 | all of them | `npm run test:live` | — |
 
@@ -148,11 +148,28 @@ SAMPLE_IMAGE=samples/costco/rotated_PXL_20260526_235419811.jpg npm run test:live
 best-effort on a crumpled photo — expect a little noise in descriptions and the
 occasional digit slip; the vision path is the clean path.
 
-## Optional: live end-to-end
+## Acceptance suite (bash/curl, containerized)
 
-These tests deliberately mock external services. To smoke-test the real stack,
-follow the README quick start (`docker compose up --build -d`) and upload the
-sample with the CLI:
+For black-box coverage against a **real running stack**, see
+**`test/acceptance/`** (`bash test/acceptance/run-all.sh`). It brings the stack
+up in containers (Podman by default), drives it from the outside via the CLI and
+raw `curl` — upload → process → `done`, list, image, view, and the error paths —
+then tears it down. It runs **isolated from any live deployment** (its own
+compose project `test-receipt-enricher`, host port `18080`, `suite=test` label,
+separate volumes; teardown refuses to touch the prod project), so it's safe to
+run alongside a running stack. Defaults to offline Tesseract; `--vision` uses
+the Anthropic path. Steps under `cli/` and `rest/` are individually runnable.
+Full docs in `test/acceptance/README.md`.
+
+> This suite hits **real Redis**, so it catches integration bugs the hermetic
+> fake-Redis suite can't — e.g. a BullMQ job id containing `:` (rejected with
+> "Custom Id cannot contain :"), which had made every upload return HTTP 400.
+
+## Optional: live end-to-end (manual)
+
+The hermetic tests deliberately mock external services. To smoke-test the real
+stack by hand, follow the README quick start (`podman-compose up --build -d`, or
+`docker compose up --build -d`) and upload the sample with the CLI:
 
 ```bash
 ./cli/receipts upload samples/costco/PXL_20260526_235419811.jpg --wait

@@ -5,7 +5,11 @@ endpoints back both ingestion paths (the bash CLI and the Telegram bot) and the
 browser views.
 
 - **Base URL:** `http://localhost:8080` (override with `PUBLIC_BASE_URL`; the
-  examples below use a `BASE` shell variable).
+  examples below use a `BASE` shell variable). The `statusUrl`/`viewUrl` the API
+  returns are built from `PUBLIC_BASE_URL`, so set it to the address you actually
+  publish — e.g. when the container's `8080` is mapped to a different host port
+  (the acceptance suite publishes `18080`), point `PUBLIC_BASE_URL` there or the
+  returned links won't resolve.
 - **Auth:** none. Run it on a trusted network or behind a reverse proxy.
 - **Content types:** JSON for the API, `multipart/form-data` for uploads,
   `text/html` for the views.
@@ -31,7 +35,7 @@ queued  ──►  processing  ──►  done
 - `failed` — all retries exhausted; `error` holds the reason.
 
 > Uploading enqueues a job on Redis/BullMQ, so the **upload path needs the full
-> stack running** (`docker compose up`/`podman compose up` — see the README).
+> stack running** (`docker compose up` / `podman-compose up` — see the README).
 > The read endpoints (`GET …`) and the web views only read records from disk and
 > work without Redis.
 

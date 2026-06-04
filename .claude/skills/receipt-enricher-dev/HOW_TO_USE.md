@@ -50,7 +50,8 @@ Personal skills in `~/.claude/skills/` are available in every session.
 ## Keeping it accurate
 
 The skill points to living docs rather than duplicating them:
-`receipt-enricher/docs/API.md` (HTTP API) and `receipt-enricher/test/README.md`
-(test design + corporate-TLS/Colab notes). If the project's architecture, env
-gotchas, or commands change, update `SKILL.md` (and those docs) so future
-sessions stay correct.
+`receipt-enricher/docs/API.md` (HTTP API), `receipt-enricher/test/README.md`
+(test design + corporate-TLS/Colab notes), and
+`receipt-enricher/test/acceptance/README.md` (the bash/curl acceptance suite +
+Podman workflow). If the project's architecture, env gotchas, or commands
+change, update `SKILL.md` (and those docs) so future sessions stay correct.

@@ -67,7 +67,11 @@ install.
 
 ## Prerequisites
 
-- Docker + Docker Compose **or** Podman + `podman compose` (or `podman-compose`).
+- Docker + Docker Compose **or** Podman. With Podman, prefer **`podman-compose`**
+  (the Python wrapper). Plain `podman compose` shells out to an external
+  `docker-compose` provider that can't reach the rootless Podman socket in some
+  setups (it fails with *"Cannot connect to the Docker daemon"*); `podman-compose`
+  drives the Podman CLI directly and is the tested path here.
 - That's it for running. For local (non-container) development you'd also want
   Node ≥ 18.
 
@@ -82,8 +86,8 @@ cp .env.example .env
 
 # 2. Build and start (pick your runtime)
 docker compose up --build -d
-#   — or —
-podman compose up --build -d
+#   — or, with Podman (use the hyphenated wrapper) —
+podman-compose up --build -d
 
 # 3. Make the CLI handy
 chmod +x cli/receipts
@@ -146,7 +150,7 @@ API_URL=http://my-server:8080 receipts upload receipt.jpg --wait
    ```bash
    docker compose --profile telegram up --build -d
    #   — or —
-   podman compose --profile telegram up --build -d
+   podman-compose --profile telegram up --build -d
    ```
 4. Send the bot a photo of a receipt. It replies with a link to the breakdown.
 
@@ -194,7 +198,7 @@ Under **rootless Podman** you'll also likely want the container UID to match
 yours so it can write there:
 
 ```bash
-podman compose up   # then, if you hit permission errors on ./data:
+podman-compose up   # then, if you hit permission errors on ./data:
 # add to the api & worker services:   userns_mode: "keep-id"
 ```
 
@@ -221,7 +225,13 @@ All via `.env` (see `.env.example`). Highlights:
 | `JOB_ATTEMPTS`       | `3`                      | retries with exponential backoff             |
 | `TELEGRAM_BOT_TOKEN` | —                        | enables the bot service                      |
 
-Inside compose, `REDIS_URL` and `DATA_DIR` are set for you.
+Inside compose, `REDIS_URL` and `DATA_DIR` are set for you. The compose file also
+reads a few **host-side** variables (with prod-safe defaults) so the same file
+can run an isolated second stack: `RECEIPT_API_PORT` (published host port,
+default `8080`), `RECEIPT_PROJECT` (compose project name), `OCR_PROVIDER`, and
+`RECEIPT_SUITE` (a `io.receipt-enricher.suite` container label). Keep
+`PUBLIC_BASE_URL` aligned with the published `host:port` so the API advertises
+links that actually resolve. (The acceptance suite uses these — see Testing.)
 
 ---
 
@@ -238,10 +248,27 @@ npm run bot
 
 ---
 
+## Testing
+
+- **Unit/integration (hermetic):** `npm test` — fast, no network, Redis, or keys.
+  Details in `test/README.md`.
+- **Live extraction checks:** `npm run test:live:vision` / `:tesseract` /
+  `:stack` / `:samples` — hit real services and self-skip when prereqs are absent.
+- **Acceptance (black-box, containerized):** `bash test/acceptance/run-all.sh`
+  builds the stack in containers and drives it from the outside via the CLI and
+  raw `curl` (upload → process → done, plus error cases), then tears it down. It
+  runs **isolated from any live deployment** — its own project name
+  (`test-receipt-enricher`) and host port (`18080`) — so it's safe to run on the
+  same host as a running stack. Defaults to offline Tesseract; pass `--vision`
+  for the Anthropic path. Steps under `cli/` and `rest/` are individually
+  runnable. See `test/acceptance/README.md`.
+
+---
+
 ## Troubleshooting
 
 - **`receipts health` fails / API unreachable** — make sure the stack is up
-  (`docker compose ps` / `podman compose ps`) and that `8080` is published.
+  (`docker compose ps` / `podman-compose ps`) and that the API port is published.
 - **Receipt stuck in `queued`** — the worker isn't running or can't reach Redis.
   Check `docker compose logs worker`.
 - **Items but no images** — enrichment is off (no `TAVILY_API_KEY`) or Tavily had
@@ -252,6 +279,12 @@ npm run bot
   mount; add `userns_mode: "keep-id"` (see Podman notes) or keep the named volume.
 - **`depends_on … condition` ignored** on older `podman-compose` — harmless; the
   app retries its Redis connection automatically, so startup order isn't fatal.
+- **`podman compose` → "Cannot connect to the Docker daemon"** — that subcommand
+  delegates to an external `docker-compose` provider that can't reach the
+  rootless Podman socket. Use **`podman-compose`** (hyphenated) instead.
+- **Links point at the wrong port** (e.g. `:8080` when you published `:18080`) —
+  set `PUBLIC_BASE_URL` to the address you actually published; the API builds
+  `statusUrl`/`viewUrl` from it.
 
 ---
 
@@ -263,12 +296,14 @@ receipt-enricher/
 ├─ Dockerfile / Containerfile
 ├─ .env.example
 ├─ cli/receipts            # the bash CLI
+├─ test/                   # node:test (hermetic + live) + acceptance/ (bash/curl)
 └─ src/
    ├─ server.js            # Express API + web views
    ├─ worker.js            # BullMQ worker
    ├─ bot.js               # Telegram bot
    ├─ queue.js  redis.js   # queue + connections
    ├─ store.js             # durable receipt records (JSON + image)
+   ├─ healthcheck.js  healthcheck-worker.js   # container healthchecks
    ├─ pipeline/            # extract → parse → enrich → summarize
    ├─ ocr/                 # vision + tesseract providers
    ├─ parse/               # structured/heuristic receipt parser
