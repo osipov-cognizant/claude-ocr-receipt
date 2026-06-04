@@ -4,12 +4,17 @@
 #   - Containers run as a non-root user; no privileged flags or host networking.
 #   - Data lives in a named volume (correct permissions on rootless Podman out of the box).
 #     To put receipt files on the host instead, see the bind-mount note in the README.
-name: receipt-enricher
+# Project name defaults to "receipt-enricher" (unchanged for normal/prod use).
+# The acceptance suite overrides it (RECEIPT_PROJECT=test-receipt-enricher) AND
+# passes a matching `-p`, so the stack is fully isolated from a prod stack.
+name: ${RECEIPT_PROJECT:-receipt-enricher}
 
 services:
   redis:
     image: docker.io/library/redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
+    labels:
+      io.receipt-enricher.suite: "${RECEIPT_SUITE:-prod}"
     volumes:
       - redis-data:/data
     healthcheck:
@@ -30,8 +35,22 @@ services:
       NODE_ENV: production
       REDIS_URL: redis://redis:6379
       DATA_DIR: /app/data
+      # 'auto' picks vision when a key is present, else tesseract (prod default).
+      # The acceptance suite sets this explicitly (tesseract by default).
+      OCR_PROVIDER: ${OCR_PROVIDER:-auto}
+      # Base URL the API advertises in statusUrl/viewUrl. Defaults to localhost:8080
+      # (matches the default published port). When the host port differs (e.g. the
+      # acceptance suite on 18080), set PUBLIC_BASE_URL — the suite exports it, and
+      # any value in .env / the shell wins here too.
+      # NOTE: kept flat (no nested ${...}) — podman-compose mishandles nested
+      # default expansions and leaks a literal '}'.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+    labels:
+      # Test indicator: "prod" for normal runs, "test" when the suite sets it.
+      io.receipt-enricher.suite: "${RECEIPT_SUITE:-prod}"
     ports:
-      - "8080:8080"
+      # Host port defaults to 8080; the suite uses 18080 to coexist with prod.
+      - "${RECEIPT_API_PORT:-8080}:8080"
     volumes:
       - receipt-data:/app/data
     depends_on:
@@ -58,6 +77,9 @@ services:
       NODE_ENV: production
       REDIS_URL: redis://redis:6379
       DATA_DIR: /app/data
+      OCR_PROVIDER: ${OCR_PROVIDER:-auto}
+    labels:
+      io.receipt-enricher.suite: "${RECEIPT_SUITE:-prod}"
     volumes:
       - receipt-data:/app/data
     depends_on:
