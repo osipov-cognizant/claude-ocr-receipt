@@ -1,0 +1,291 @@
+# Receipt Enricher
+
+Turn a phone photo of a grocery receipt into a structured, enriched breakdown.
+
+You send a photo (Costco, Sprouts, Publix, etc.). The service extracts the line
+items and prices, looks up a product image and a bit of metadata for each item
+via **Tavily**, and gives you a shareable link to the full breakdown. Two ways
+in: a **Telegram bot** and a **CLI**. Everything runs in containers and works
+with **Docker or Podman**.
+
+---
+
+## How it works
+
+```
+                 ┌──────────────┐         ┌──────────────────────────────┐
+   Telegram ───► │              │         │            worker            │
+                 │   api (REST  │  BullMQ  │  OCR/vision → parse → Tavily │
+   CLI / curl ─► │   + web view)│ ───────► │  enrich → summarize          │
+                 │              │  (Redis) │                              │
+                 └──────┬───────┘         └───────────────┬──────────────┘
+                        │  durable receipt records (JSON + image)         │
+                        └──────────────── shared volume ──────────────────┘
+```
+
+The flow:
+
+1. **Ingest** — a receipt image arrives via the REST API. The Telegram bot is
+   just another REST client: it downloads the photo and POSTs it to the same
+   endpoint, so there is a single ingestion path.
+2. **Queue** — the API saves the image + a record to disk, then enqueues a tiny
+   job (`{ receiptId }`) on a **Redis-backed BullMQ queue**. The API responds
+   `202 Accepted` immediately. Jobs survive restarts and retry with backoff, so
+   incoming receipts are not dropped under load or transient failures.
+3. **Process** (worker):
+   - **Extract** the receipt — a vision model (Anthropic or OpenAI) returns
+     structured line items directly, or Tesseract OCR produces raw text that a
+     heuristic parser turns into items.
+   - **Parse** into a canonical shape: `{ store, items[], totals }`.
+   - **Enrich** each item through Tavily (image + title + snippet), cached in
+     Redis so repeat items don't re-spend API credits.
+   - **Summarize** and mark the record `done`.
+4. **View** — open the link. The web page updates as you refresh; the same data
+   is available as JSON.
+
+**Graceful degradation:** with no API keys at all, it still runs — it falls back
+to offline Tesseract OCR and simply skips enrichment. Add a Tavily key to get
+images; add a vision key for much better item extraction.
+
+---
+
+## Components
+
+| Service  | What it is                          | Toolchain        |
+|----------|-------------------------------------|------------------|
+| `api`    | REST API + server-rendered web view | Node + Express   |
+| `worker` | Pipeline (extract → enrich)         | Node + BullMQ    |
+| `redis`  | Queue + enrichment cache            | Redis 7          |
+| `bot`    | Telegram ingestion (optional)       | Node + Telegraf  |
+| `cli`    | Lightweight client                  | **bash + curl**  |
+
+The CLI is deliberately not Node — it's a single bash script that calls the REST
+API with `curl` (and uses `jq` for pretty output if you have it). Nothing to
+install.
+
+---
+
+## Prerequisites
+
+- Docker + Docker Compose **or** Podman + `podman compose` (or `podman-compose`).
+- That's it for running. For local (non-container) development you'd also want
+  Node ≥ 18.
+
+---
+
+## Quick start
+
+```bash
+# 1. Configure (works fine with everything blank — see "Modes" below)
+cp .env.example .env
+#   then edit .env to add keys you have (TAVILY_API_KEY, ANTHROPIC_API_KEY, ...)
+
+# 2. Build and start (pick your runtime)
+docker compose up --build -d
+#   — or —
+podman compose up --build -d
+
+# 3. Make the CLI handy
+chmod +x cli/receipts
+export PATH="$PWD/cli:$PATH"      # or: alias receipts="$PWD/cli/receipts"
+
+# 4. Check health, then upload a receipt photo
+receipts health
+receipts upload ~/Pictures/costco-receipt.jpg --wait
+```
+
+`upload --wait` blocks until processing finishes and prints the record plus a
+`view:` URL. Open it in a browser, or just visit <http://localhost:8080> to see
+all receipts.
+
+---
+
+## Modes (what works with which keys)
+
+| You have…                         | Extraction        | Enrichment        |
+|-----------------------------------|-------------------|-------------------|
+| nothing                           | Tesseract OCR     | skipped           |
+| `TAVILY_API_KEY`                  | Tesseract OCR     | ✅ images/metadata |
+| `ANTHROPIC_API_KEY` (or OpenAI)   | ✅ vision model    | skipped           |
+| both                              | ✅ vision model    | ✅ images/metadata |
+
+For real receipts, a **vision model is strongly recommended** — raw Tesseract on
+a crumpled phone photo is hit-or-miss, while a vision model reads the layout and
+returns clean items. The default vision model is `claude-sonnet-4-6`; override
+with `ANTHROPIC_MODEL`, or set `VISION_PROVIDER=openai` with `OPENAI_API_KEY`.
+
+> Tesseract note: it downloads its English data on first run (then caches it),
+> and it can't read HEIC — convert iPhone photos to JPEG/PNG if you use it.
+
+---
+
+## Using it
+
+### CLI
+
+```bash
+receipts upload <image> [--wait]   # upload a photo, optionally wait for results
+receipts status <id>               # full JSON record
+receipts list                      # recent receipts
+receipts wait <id>                 # poll until done/failed
+receipts view <id>                 # print + open the web view
+receipts health                    # API + Redis status
+```
+
+Point it at a remote host with `API_URL`:
+
+```bash
+API_URL=http://my-server:8080 receipts upload receipt.jpg --wait
+```
+
+### Telegram bot
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.
+2. Put it in `.env` as `TELEGRAM_BOT_TOKEN=...`.
+3. Start the optional `bot` service via its profile:
+   ```bash
+   docker compose --profile telegram up --build -d
+   #   — or —
+   podman compose --profile telegram up --build -d
+   ```
+4. Send the bot a photo of a receipt. It replies with a link to the breakdown.
+
+The link the bot sends is built from `PUBLIC_BASE_URL`, so set that to an address
+Telegram-side you can actually open (not `localhost` if you're on your phone).
+
+### Raw REST API
+
+```bash
+# Upload (field name: "receipt")
+curl -F "receipt=@receipt.jpg" http://localhost:8080/api/receipts
+# -> 202 { "id": "...", "status": "queued", "statusUrl": "...", "viewUrl": "..." }
+
+curl http://localhost:8080/api/receipts/<id>     # one record (JSON)
+curl http://localhost:8080/api/receipts          # list
+# Web view:        http://localhost:8080/receipts/<id>/view
+# Original photo:  http://localhost:8080/receipts/<id>/image
+```
+
+---
+
+## Podman & security notes
+
+This stack is built to run rootless under Podman with no special flags:
+
+- **Fully-qualified images** (`docker.io/library/...`) so Podman won't prompt you
+  to choose a registry.
+- **Non-root containers** — the app image runs as the built-in `node` user; no
+  `privileged`, no host networking, no capabilities added.
+- **Named volumes** for both Redis data and receipt data. On rootless Podman this
+  avoids the usual bind-mount UID-mapping permission headaches — it just works.
+- **Unprivileged port** — the API listens on `8080` (rootless can't bind <1024).
+- A `Containerfile` symlink is included since Podman looks for that name by
+  default, though `docker-compose.yml` points both runtimes at `Dockerfile`.
+
+**Want the receipt files on your host filesystem** (to inspect the JSON/images)?
+Swap the named volume for a bind mount on the `api` and `worker` services:
+
+```yaml
+    volumes:
+      - ./data:/app/data:Z      # :Z applies an SELinux label (Fedora/RHEL)
+```
+
+Under **rootless Podman** you'll also likely want the container UID to match
+yours so it can write there:
+
+```bash
+podman compose up   # then, if you hit permission errors on ./data:
+# add to the api & worker services:   userns_mode: "keep-id"
+```
+
+(Docker users can use `./data:/app/data` with no `:Z` and no `userns`.)
+
+---
+
+## Configuration reference
+
+All via `.env` (see `.env.example`). Highlights:
+
+| Variable             | Default                  | Notes                                        |
+|----------------------|--------------------------|----------------------------------------------|
+| `PORT`               | `8080`                   | API port                                     |
+| `PUBLIC_BASE_URL`    | `http://localhost:8080`  | Used to build shareable links                |
+| `OCR_PROVIDER`       | `auto`                   | `auto` \| `vision` \| `tesseract`            |
+| `VISION_PROVIDER`    | `anthropic`              | `anthropic` \| `openai`                      |
+| `ANTHROPIC_API_KEY`  | —                        | enables vision extraction                    |
+| `ANTHROPIC_MODEL`    | `claude-sonnet-4-6`      | any vision-capable Claude model              |
+| `OPENAI_API_KEY`     | —                        | alternative vision provider                  |
+| `TAVILY_API_KEY`     | —                        | enables item image/metadata enrichment       |
+| `ENRICH_MAX_ITEMS`   | `40`                     | cap Tavily lookups per receipt               |
+| `QUEUE_CONCURRENCY`  | `2`                      | parallel receipts in the worker              |
+| `JOB_ATTEMPTS`       | `3`                      | retries with exponential backoff             |
+| `TELEGRAM_BOT_TOKEN` | —                        | enables the bot service                      |
+
+Inside compose, `REDIS_URL` and `DATA_DIR` are set for you.
+
+---
+
+## Local development (without containers)
+
+```bash
+npm install
+# In separate terminals (needs a Redis on localhost:6379):
+npm run server
+npm run worker
+# optional:
+npm run bot
+```
+
+---
+
+## Troubleshooting
+
+- **`receipts health` fails / API unreachable** — make sure the stack is up
+  (`docker compose ps` / `podman compose ps`) and that `8080` is published.
+- **Receipt stuck in `queued`** — the worker isn't running or can't reach Redis.
+  Check `docker compose logs worker`.
+- **Items but no images** — enrichment is off (no `TAVILY_API_KEY`) or Tavily had
+  no image for that query. The record will still list the items and prices.
+- **Garbled / missing items with Tesseract** — expected for messy photos; add a
+  vision key for accurate extraction.
+- **Permission errors writing `./data` on Podman** — you switched to a bind
+  mount; add `userns_mode: "keep-id"` (see Podman notes) or keep the named volume.
+- **`depends_on … condition` ignored** on older `podman-compose` — harmless; the
+  app retries its Redis connection automatically, so startup order isn't fatal.
+
+---
+
+## Project layout
+
+```
+receipt-enricher/
+├─ docker-compose.yml      # api + worker + redis (+ optional bot profile)
+├─ Dockerfile / Containerfile
+├─ .env.example
+├─ cli/receipts            # the bash CLI
+└─ src/
+   ├─ server.js            # Express API + web views
+   ├─ worker.js            # BullMQ worker
+   ├─ bot.js               # Telegram bot
+   ├─ queue.js  redis.js   # queue + connections
+   ├─ store.js             # durable receipt records (JSON + image)
+   ├─ pipeline/            # extract → parse → enrich → summarize
+   ├─ ocr/                 # vision + tesseract providers
+   ├─ parse/               # structured/heuristic receipt parser
+   ├─ enrich/              # Tavily client + cache
+   └─ web/                 # server-rendered receipt views
+```
+
+---
+
+## Notes & known limits
+
+- The heuristic Tesseract parser is best-effort; the vision path is the quality
+  path. Store detection covers common US chains and is easy to extend in
+  `src/parse/receiptParser.js`.
+- Records are stored as JSON files (durable, survive a Redis flush). For a
+  multi-worker deployment, move the record store into Redis/a DB to avoid the
+  read-modify-write race noted in `src/store.js`.
+- No auth is included — run it on a trusted network or put it behind a reverse
+  proxy if you expose it.
+```

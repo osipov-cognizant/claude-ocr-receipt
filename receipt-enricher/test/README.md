@@ -1,0 +1,159 @@
+# Test suite
+
+End-to-end coverage of the receipt pipeline, built on the **Node built-in test
+runner** (`node --test`) — no extra dependencies, no test framework to install.
+
+```bash
+npm install      # one-time, installs the app deps the tests load
+npm test         # runs everything in test/*.test.js
+node --test test/pipeline.test.js    # run a single file
+```
+
+## What it proves
+
+The suite drives the full flow against the **real sample receipt**
+(`samples/costco/PXL_20260526_235419811.jpg`, a Costco Boca Raton #345 ticket).
+Ground truth for that receipt lives in `fixtures/costco-sample.js` in two forms
+— the clean JSON a vision model returns, and a realistic raw-OCR dump — so both
+extraction paths are tested against one source of truth.
+
+| File | Layer | Highlights |
+|------|-------|-----------|
+| `parser.test.js`     | `parse/receiptParser` | line-item + price extraction, SKU pull-off, noise filtering, **TOTAL-vs-SUBTOTAL regression guard**, structured-vs-OCR agreement, store canonicalization, **`subtotalMatch` reconciliation (true/false/null)** |
+| `store-aliases.test.js` | `parse` (config) | the **configurable store-alias JSON** (`STORE_ALIASES_PATH`): multi-word vision names + custom aliases resolve to their canonical chain; unknown names kept verbatim |
+| `store.test.js`      | `store`               | persists the **actual sample JPEG** byte-for-byte, record CRUD, newest-first listing, mime→extension |
+| `enrich.test.js`     | `enrich` + Tavily     | graceful skip when disabled, Tavily image/metadata mapping, **Redis cache hit avoids re-spending credits**, `ENRICH_MAX_ITEMS` cap, per-item error isolation |
+| `ocr-vision.test.js` | `ocr/vision`          | Anthropic + OpenAI request shapes, base64 image attach, ```json``` fence stripping, prose-wrapped JSON recovery, API-error surfacing |
+| `ocr-index.test.js`  | `ocr` (dispatch)      | provider selection (`vision` vs `tesseract`) from config, record pass-through, **provider tag on the result** |
+| `pipeline.test.js`   | `pipeline`            | **full extract → parse → enrich → summarize → `done`** on the sample image; tesseract+no-key degradation path; failure propagation |
+| `routes.test.js`     | `app` + `routes` (HTTP) | drives the **real Express app over loopback**: upload validation (no file → 400, non-image → 400, oversize → **413**), `202` + enqueue + persisted record, alternate field names, list shape/`limit` clamp, `404`s, view/image/root HTML, `/health` |
+| `config.test.js`     | `config`              | the README "which keys → which mode" matrix (nothing / Tavily / Anthropic / OpenAI / both / overrides) |
+| `view.test.js`       | `web/view`            | HTML rendering of items/totals/enrichment images, list + empty states, **HTML-escaping against injection from receipt text**, subtotal reconciliation note (shortfall warning / overage / ✓ match) |
+
+## Hermetic by design
+
+Tests run **offline with no API keys and no Redis**:
+
+- **Network** (`fetch`) is stubbed per-test, so vision (Anthropic/OpenAI) and
+  Tavily calls return canned responses — request shape is asserted, nothing
+  leaves the machine.
+- **Redis** is replaced with an in-memory fake injected into the require cache,
+  so the enrichment cache and queue connections need no running server.
+- **Data dir** is redirected to a fresh `os.tmpdir()` folder per file and
+  cleaned up afterward — nothing is written under `data/`.
+
+See `helpers/harness.js` for these utilities. The HTTP test (`routes.test.js`)
+additionally binds the real Express app to an ephemeral **loopback** port and
+hits it with the real global `fetch` (so request parsing, multer, and the error
+handler are exercised end-to-end) — still offline. It stubs `src/queue` in the
+require cache so requiring the routes never opens a BullMQ/Redis connection.
+
+## Bug this suite caught
+
+`src/ocr/vision.js` imported `./config` / `./logger` (which don't exist in
+`src/ocr/`) instead of `../config` / `../logger`. The entire vision-extraction
+path — the README's recommended mode — threw `MODULE_NOT_FOUND` the moment an
+API key was set. Fixed, with `ocr-vision.test.js` and `pipeline.test.js`
+guarding against regressions.
+
+## Live tests (one per extraction option)
+
+Real, runnable tests under `test/live/` — each reads the sample receipt and
+prints its contents, and each self-skips when its prerequisites are missing
+(so they never break `npm test`, which is scoped to `test/*.test.js`).
+
+| Option | Command | Needs |
+|--------|---------|-------|
+| 1. Vision model | `ANTHROPIC_API_KEY=sk-... npm run test:live:vision` | a vision API key |
+| 2. Offline Tesseract | `npm run test:live:tesseract` | reachable CDN for first-run data |
+| 3. Full stack | `npm run test:live:stack` | `docker/podman compose up -d` running |
+| 4. Sample corpus | `ANTHROPIC_API_KEY=sk-... npm run test:live:samples` | a vision API key |
+| all of them | `npm run test:live` | — |
+
+**Sample corpus (`samples.live.test.js`)** runs the vision model over *every*
+photo in `samples/costco/` (skipping `rotated_` duplicates), prints a one-line
+summary per receipt, and asserts the invariants a good extraction must meet —
+Costco recognized, ≥1 item, numeric prices, and totals captured on most. It's a
+smoke test against real (non-deterministic) model output, so it surfaces quality
+regressions without being brittle, and self-skips with no key. Each entry also
+reports `subtotalMatch` (do the items reconcile with the printed subtotal?) and
+flags a **shortfall** — items summing under the subtotal, a likely missed line.
+
+### Corporate TLS proxy gotcha (important on managed networks)
+
+**Node has its own CA bundle, independent of the macOS keychain / `curl`.** On a
+network that does TLS inspection (e.g. a corporate proxy), Node can't validate
+the intercepted certificate and outbound HTTPS fails with
+`UNABLE_TO_GET_ISSUER_CERT_LOCALLY` — even though `curl` and the browser work.
+
+On the network this was developed on, the interception was **selective**:
+
+| Host | Node fetch | Affected feature |
+|------|-----------|------------------|
+| `api.anthropic.com` | ✅ trusted | vision extraction works |
+| `cdn.jsdelivr.net`  | ❌ blocked | Tesseract first-run data download |
+| `api.tavily.com`    | ❌ blocked | item enrichment (images/metadata) |
+
+So the **vision path (Option 1) is the reliable way to read a receipt here**;
+Tesseract and Tavily need Node to trust the corporate root CA:
+
+```bash
+# Point Node at your corporate root CA (proper fix — applies to all the above):
+NODE_EXTRA_CA_CERTS=/path/to/corp-root-ca.pem npm run test:live:tesseract
+
+# Quick, INSECURE dev-only escape hatch (disables TLS verification):
+NODE_TLS_REJECT_UNAUTHORIZED=0 npm run test:live:tesseract
+```
+
+The Tesseract test does a fast TLS preflight and **skips in <1s** (rather than
+hanging on a wedged download) when the CDN is unreachable from Node.
+
+### Making the offline Tesseract path work without CDN access
+
+Fetch the language data from a clean network (e.g. Google Colab) and drop it in
+`tessdata/`. The code points Tesseract at that folder (`config.tessdataDir`,
+override via `TESSDATA_PATH`), so it loads from disk and never calls the CDN.
+
+Run this in a **Google Colab** cell, then download `eng.traineddata`:
+
+```python
+import requests, gzip
+url = "https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng/4.0.0_best_int/eng.traineddata.gz"
+raw = requests.get(url, timeout=60).content
+data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw   # normalize to uncompressed
+open("eng.traineddata", "wb").write(data)
+print("eng.traineddata:", len(data), "bytes")
+assert len(data) > 1_000_000, "download looks wrong (too small)"
+from google.colab import files
+files.download("eng.traineddata")
+```
+
+Then on this machine:
+
+```bash
+mv ~/Downloads/eng.traineddata receipt-enricher/tessdata/
+npm run test:live:tesseract     # now OCRs the sample instead of skipping
+```
+
+**Orientation matters for Tesseract.** The bundled sample is shot rotated 90°,
+and Tesseract reads sideways text as noise (vision models don't care). Rotate the
+photo upright first, then point the live test at it with `SAMPLE_IMAGE`:
+
+```bash
+# upright copy reads cleanly: 12 items, ~$121 sum, fully offline
+SAMPLE_IMAGE=samples/costco/rotated_PXL_20260526_235419811.jpg npm run test:live:tesseract
+```
+
+`SAMPLE_IMAGE` works for any live test (vision/stack too). Quality is still
+best-effort on a crumpled photo — expect a little noise in descriptions and the
+occasional digit slip; the vision path is the clean path.
+
+## Optional: live end-to-end
+
+These tests deliberately mock external services. To smoke-test the real stack,
+follow the README quick start (`docker compose up --build -d`) and upload the
+sample with the CLI:
+
+```bash
+./cli/receipts upload samples/costco/PXL_20260526_235419811.jpg --wait
+```

@@ -1,0 +1,100 @@
+# Compatible with `docker compose` and `podman compose` (and podman-compose).
+# Notes for Podman / rootless:
+#   - Images are fully qualified (docker.io/...) so Podman won't prompt for a registry.
+#   - Containers run as a non-root user; no privileged flags or host networking.
+#   - Data lives in a named volume (correct permissions on rootless Podman out of the box).
+#     To put receipt files on the host instead, see the bind-mount note in the README.
+name: receipt-enricher
+
+services:
+  redis:
+    image: docker.io/library/redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "src/server.js"]
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379
+      DATA_DIR: /app/data
+    ports:
+      - "8080:8080"
+    volumes:
+      - receipt-data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # Script form (no inline shell) so it runs cleanly even when the compose
+      # runtime executes the healthcheck via /bin/sh.
+      test: ["CMD", "node", "src/healthcheck.js"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "src/worker.js"]
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379
+      DATA_DIR: /app/data
+    volumes:
+      - receipt-data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # The worker serves no HTTP; verify its real dependency (Redis) instead.
+      test: ["CMD", "node", "src/healthcheck-worker.js"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # Optional. Only starts when you opt in:
+  #   docker compose --profile telegram up   (or)   podman compose --profile telegram up
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "src/bot.js"]
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379
+      DATA_DIR: /app/data
+      API_URL: http://api:8080
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    restart: unless-stopped
+    profiles:
+      - telegram
+
+volumes:
+  redis-data:
+  receipt-data:

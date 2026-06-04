@@ -1,0 +1,36 @@
+# Repo-root .gitignore — applies if git is initialized here (the parent of
+# receipt-enricher/). The project also has its own receipt-enricher/.gitignore.
+
+# ----------------------------------------------------------------------------
+# Environment / secrets — NEVER commit any .env file, anywhere in the tree.
+# These patterns are recursive, so they also cover receipt-enricher/.env etc.
+# Keep the checked-in example templates.
+# ----------------------------------------------------------------------------
+.env
+.env.*
+*.env
+!.env.example
+!.env.sample
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+*.log
+
+# Durable receipt data (large; machine-local)
+**/data/uploads/*
+**/data/receipts/*
+
+# Tesseract language data (large; fetched per machine)
+**/tessdata/*.traineddata
+**/tessdata/*.traineddata.gz
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Temp/scratch files
+tmp_*.js
