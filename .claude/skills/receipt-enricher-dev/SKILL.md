@@ -9,12 +9,15 @@ description: >-
   suite). Use this skill whenever working IN THIS repo: editing or debugging the
   API, worker, or pipeline; the receipt parser and store detection (KNOWN_STORES
   in src/parse); the OCR providers in src/ocr; Tavily enrichment; the CLI or web
-  views; running the hermetic or live tests (e.g. `npm run test:live:vision`
-  skipping, or Tesseract producing garbage); processing a receipt or viewing its
-  extracted metadata at localhost:8080; uploading via the REST API with curl; or
-  hitting the project's known gotchas (corporate TLS breaking jsdelivr/Tavily but
-  not Anthropic, an empty ANTHROPIC_API_KEY shadowing .env, Tesseract needing an
-  upright image + local tessdata, or the vision MODULE_NOT_FOUND import bug).
+  views; running the hermetic, live, or bash/curl acceptance tests (e.g.
+  `npm run test:live:vision` skipping, Tesseract producing garbage, or
+  `test/acceptance/run-all.sh`); standing up or tearing down the containerized
+  stack with podman-compose (or docker compose); processing a receipt or viewing
+  its extracted metadata at localhost:8080; uploading via the REST API with curl;
+  or hitting the project's known gotchas (corporate TLS breaking jsdelivr/Tavily
+  but not Anthropic, an empty ANTHROPIC_API_KEY shadowing .env, Tesseract needing
+  an upright image + local tessdata, `podman compose` vs `podman-compose`, or the
+  vision MODULE_NOT_FOUND import bug).
   Consult it before guessing how this codebase is wired or why an
   extract/parse/enrich/test step behaves as it does. It covers developing and
   running THIS app — not generic OCR/PDF extraction, generic BullMQ/Redis/Docker/
@@ -49,16 +52,19 @@ receipt-enricher/
 │  ├─ ocr/  index.js vision.js tesseract.js   # extraction providers
 │  ├─ parse/receiptParser.js     # normalizeStructured() + parseText() heuristics
 │  ├─ enrich/ index.js tavily.js # Tavily lookup + Redis cache
-│  └─ web/view.js          # server-rendered HTML (renderReceipt / renderList)
+│  ├─ web/view.js          # server-rendered HTML (renderReceipt / renderList)
+│  └─ healthcheck.js  healthcheck-worker.js   # container healthchecks (see Podman)
 ├─ cli/receipts            # bash + curl CLI (no Node needed)
 ├─ test/                   # node:test suite — see test/README.md
 │  ├─ *.test.js            # hermetic (no network/redis/keys); run by `npm test`
 │  ├─ live/*.live.test.js  # real services; self-skip when prereqs absent
+│  ├─ acceptance/          # bash/curl black-box suite vs a container stack (see its README)
 │  ├─ fixtures/ helpers/   # costco sample fixtures + harness (fetch/redis stubs)
 ├─ tessdata/               # offline Tesseract eng.traineddata (see its README)
 ├─ docs/API.md             # full HTTP API reference + curl walkthrough
 ├─ data/                   # durable records (data/receipts/*.json, data/uploads/*)
-├─ docker-compose.yml  Dockerfile  Containerfile  .env.example
+├─ docker-compose.yml      # PARAMETERIZED (project/port/OCR/label/base-url) — see Podman
+├─ Dockerfile  Containerfile  .env.example
 └─ README.md
 samples/costco/
 ├─ PXL_20260526_235419811.jpg          # the original sample — shot ROTATED 90°
@@ -73,7 +79,7 @@ test design, read **`receipt-enricher/test/README.md`**.
 ```bash
 cd /Users/952657/Projects/claude-ocr-receipt/receipt-enricher
 npm install          # one-time
-npm test             # 64 hermetic tests — no network, no Redis, no API keys
+npm test             # ~76 hermetic tests — no network, no Redis, no API keys
 ```
 
 The hermetic suite must always pass and stay self-contained (it stubs `fetch`
@@ -82,18 +88,86 @@ to `test/*.test.js` so the live tests never run by accident.
 
 ### Running the app
 
-This machine has **no Docker/Podman/Redis installed**, so the full compose stack
-can't run here. But you can still develop and view receipts:
+Three ways, depending on whether you need the queue/worker:
 
-- **View existing receipts without Redis:** `npm run server`, then open
-  http://localhost:8080. The server logs Redis-connection errors (harmless) —
-  only the upload→queue path needs Redis; the read/view endpoints read records
-  straight from `data/` and work fine.
+- **Read-only / no Redis:** `npm run server`, then open http://localhost:8080.
+  Redis-connection errors in the log are harmless — only the upload→queue path
+  needs Redis; the read/view endpoints read records straight from `data/`.
 - **Process a receipt without the queue:** call `pipeline.processReceipt(id)`
-  directly (this is how records get seeded locally — see "Process a receipt
-  locally" below). The worker (`npm run worker`) and uploads need a real Redis.
-- **Full stack (where available):** `docker compose up --build -d` (or
-  `podman compose up --build -d`), then `./cli/receipts upload <img> --wait`.
+  directly (how records get seeded locally — see "Process a receipt locally").
+- **Full stack (the real upload→queue→worker path):** run it in containers with
+  Podman — see "Containerized stack (Podman)" below.
+
+## Containerized stack (Podman)
+
+Podman **is** installed on this host (older notes that said "no Podman" are
+stale). What you need to know:
+
+- The binary lives at **`/opt/podman/bin`** and isn't always on `PATH` —
+  `export PATH="/opt/podman/bin:$PATH"` first. The VM is a running `applehv`
+  machine (`podman machine list`; `podman machine start` if stopped).
+- **Use `podman-compose` (hyphen), NOT `podman compose`.** Plain `podman
+  compose` delegates to an external `docker-compose` provider that can't reach
+  the podman socket here ("Cannot connect to the Docker daemon"). The hyphenated
+  `podman-compose` (a pyenv/pip shim) drives the CLI directly and works.
+- `podman-compose` does **not** auto-recreate running containers on `up` (you
+  get "container name already in use"). To apply code/compose/env changes:
+  `podman-compose down` then `podman-compose up --build -d`.
+
+```bash
+export PATH="/opt/podman/bin:$PATH"
+cd receipt-enricher
+podman-compose up --build -d        # redis + api(:8080) + worker
+curl -fsS localhost:8080/health | jq .
+podman-compose down                 # stop, KEEP volumes
+podman-compose down -v              # stop + WIPE data volumes (fresh slate)
+```
+
+The compose file is **parameterized** with prod-safe defaults, so the same file
+serves prod and the test suite: `RECEIPT_PROJECT` (project name),
+`RECEIPT_API_PORT` (host port), `OCR_PROVIDER`, `RECEIPT_SUITE` (container
+label), `PUBLIC_BASE_URL`. A plain `up` is unchanged (project `receipt-enricher`,
+port 8080, `auto` OCR). **`PUBLIC_BASE_URL` defaults to `http://localhost:8080`
+and is what the API advertises in `statusUrl`/`viewUrl`** — set it whenever the
+published host port differs (e.g. the test stack on 18080) or links point at the
+wrong port.
+
+**Healthchecks are real** (`src/healthcheck.js` GETs `/health`;
+`src/healthcheck-worker.js` PINGs Redis). They're *script files*, not inline
+`node -e "..."`: the runtime runs the healthcheck via `/bin/sh`, where parens in
+an inline program (`fetch(...)`) throw `syntax error` and the container shows
+`unhealthy` forever.
+
+## Acceptance suite (bash/curl) — `test/acceptance/`
+
+Black-box tests that bring the stack up in containers and drive it from the
+outside via the CLI and raw curl. Separate from `npm test` (hermetic) and
+`test/live/*` (node-driven). Full details in `test/acceptance/README.md`.
+
+```bash
+cd receipt-enricher
+bash test/acceptance/run-all.sh                # up → cli/ + rest/ steps → teardown
+bash test/acceptance/run-all.sh --vision       # Anthropic instead of Tesseract
+bash test/acceptance/run-all.sh --no-teardown  # leave the stack up to inspect
+bash test/acceptance/rest/20_upload.sh         # one step (stack must be up first)
+```
+
+- **Layout:** `lib/{common,compose}.sh`, `lifecycle/{00_up,99_down}.sh`, `cli/*`
+  (via `cli/receipts`), `rest/*` (raw curl). Steps are independently runnable and
+  self-seed a receipt (cached id in `.state/`, gitignored).
+- **Isolated from any prod stack on the host:** distinct project
+  `test-receipt-enricher`, host port `18080`, label `io.receipt-enricher.suite=
+  test`, separate volumes. Teardown is scoped to the test project and **refuses
+  to run against the prod name `receipt-enricher`**; removes volumes by default
+  (`RE_TEST_KEEP_VOLUMES=1` keeps them).
+- **OCR default = offline Tesseract** — works in-container because
+  `tesseract.js-core` (wasm) and `tessdata/eng.traineddata` are bundled, so no
+  CDN. `RE_TEST_OCR=vision` uses `claude-sonnet-4-6`. Assertions are structural +
+  HTTP only; item-count/store are asserted only on the vision path (Tesseract
+  text is noisy by design).
+- **Engine:** `podman` by default; `RE_TEST_ENGINE=docker` switches to
+  `docker compose`. Config: `RE_TEST_{ENGINE,PROJECT,API_PORT,BASE,OCR,SAMPLE,
+  KEEP_VOLUMES,NO_TEARDOWN,POLL_TIMEOUT}`.
 
 ## Extraction modes & expected behavior
 
@@ -159,6 +233,16 @@ non-obvious failures. Before debugging code, rule these out:
      `config.tessdataDir` (override `TESSDATA_PATH`), so no CDN download is
      needed. Without local data on a CDN-blocked network, `tesseract.js` hangs
      (its download has no timeout) — the live test preflights and skips fast.
+   - In the **container**, Tesseract runs fully offline: `tesseract.js-core`
+     (wasm) is reinstalled by `npm ci` and `tessdata` is `COPY`d in, so the
+     CDN-hang doesn't apply there.
+
+5. **`podman compose` vs `podman-compose`, and a substitution bug.** Use the
+   hyphenated `podman-compose` (see "Containerized stack"). Also, podman-compose
+   mishandles **nested** `${VAR:-...${VAR2:-x}}` default expansions — it leaks a
+   literal `}` into the value. Keep compose interpolation **flat** (this is why
+   `PUBLIC_BASE_URL` defaults to a literal `http://localhost:8080`, not a nested
+   `...${RECEIPT_API_PORT}`).
 
 ## Testing model
 
@@ -170,6 +254,9 @@ non-obvious failures. Before debugging code, rule these out:
   stack) is missing, and prints the extracted receipt. `SAMPLE_IMAGE` overrides
   the input photo for the single-image tests; `test:live:samples` runs the
   vision model over the whole `samples/costco/` corpus as a quality smoke test.
+- **Acceptance** (`test/acceptance/run-all.sh`): bash/curl black-box tests
+  against a containerized stack, isolated from prod. See the dedicated section
+  above and `test/acceptance/README.md`.
 - Coverage map and the corporate-TLS/Colab notes are in `test/README.md`.
 
 ## Common tasks
@@ -207,3 +294,11 @@ built-in list if the file is missing. **Add/adjust an extractor:** `src/ocr/`.
 - `src/ocr/vision.js` must require `../config`/`../logger` (one level up). A
   past bug used `./config`/`./logger`, which broke the entire vision path with
   `MODULE_NOT_FOUND`; `ocr-vision.test.js` and `pipeline.test.js` guard it.
+- **BullMQ custom job ids must not contain `:`.** `queue.js` uses
+  `receipt-<id>`; a past `receipt:<id>` made *every* upload fail with HTTP 400
+  ("Custom Id cannot contain :"). The hermetic suite's fake Redis didn't catch
+  it (it doesn't validate ids) — the acceptance suite does, since it hits real
+  Redis. Keep job ids `:`-free.
+- The acceptance suite must stay isolated: never point its teardown at the prod
+  project, never bind the prod host port. Defaults (`test-receipt-enricher`,
+  18080) already ensure this; the teardown guard refuses the prod name.
