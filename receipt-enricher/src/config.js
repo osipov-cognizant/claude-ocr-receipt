@@ -75,6 +75,17 @@ const config = {
   // instead of stalling a worker slot indefinitely. Override with TESSERACT_TIMEOUT_MS.
   tesseractTimeoutMs: Number(process.env.TESSERACT_TIMEOUT_MS) || 120000,
 
+  // Tesseract orientation handling. Before recognition the OCR module runs
+  // Tesseract's OSD (orientation & script detection) to find the page rotation
+  // (0/90/180/270) so a sideways or upside-down phone photo is corrected first.
+  // Needs osd.traineddata in tessdataDir; if it's missing or OSD isn't confident
+  // the module falls back to skew-only auto-rotation. Disable with TESSERACT_OSD=0.
+  tesseractOsd: process.env.TESSERACT_OSD !== '0',
+  // Minimum OSD confidence before a 90/180/270 rotation is trusted and applied.
+  // Below this we leave orientation alone (a low-confidence reading on a noisy
+  // photo can otherwise flip an already-upright image into garbage).
+  tesseractOsdMinConfidence: Number(process.env.TESSERACT_OSD_MIN_CONFIDENCE) || 1.0,
+
   // JSON file mapping canonical store names to their aliases/substrings. The
   // parser uses it to normalize store names (e.g. "Costco Wholesale" -> "Costco")
   // across the vision and OCR paths. Override to ship your own store list.

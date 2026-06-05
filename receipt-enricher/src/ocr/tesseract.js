@@ -1,14 +1,19 @@
 'use strict';
 
 const fs = require('fs');
-const Tesseract = require('tesseract.js');
+const { createWorker } = require('tesseract.js');
 const config = require('../config');
 const logger = require('./../logger');
 const { imagePathFor } = require('../store');
 
 /**
  * Returns raw OCR text only. The heuristic parser turns this into line items.
- * Note: the English trained-data is loaded from the local tessdata dir (see
+ *
+ * Pipeline: detect page orientation with Tesseract OSD, then recognize with the
+ * orientation corrected. A phone photo shot sideways or upside-down therefore
+ * reads correctly without manual pre-rotation.
+ *
+ * The English (and OSD) trained-data is loaded from the local tessdata dir (see
  * config.tessdataDir), so this runs fully offline — no jsdelivr CDN download.
  * HEIC images are not supported by tesseract; convert to JPEG/PNG before
  * sending if you use this provider.
@@ -18,16 +23,11 @@ const { imagePathFor } = require('../store');
 async function extract(record) {
   const imgPath = imagePathFor(record);
 
-  // Use a local tessdata directory as both the cache and the offline lang-path.
-  // We ship the *uncompressed* eng.traineddata, so:
-  //   - cachePath: tesseract.js reads/writes `<dir>/eng.traineddata` (uncompressed).
-  //   - langPath + gzip:false: on a cache miss it falls back to reading
-  //     `<dir>/eng.traineddata` too. With the default gzip:true it would instead
-  //     look for `<dir>/eng.traineddata.gz` (which we do NOT ship) and fail with
-  //     ENOENT — the in-container crash this module had. (The gunzip step still
-  //     auto-detects gzip magic bytes, so a .gz on disk would also load fine.)
-  // Either way it never touches the jsdelivr CDN. The dir must exist for the
-  // cache write-back; create it if missing.
+  // Local tessdata dir doubles as cache and offline lang-path. We ship the
+  // *uncompressed* eng.traineddata (and osd.traineddata), so gzip:false makes
+  // both the cache read and the langPath fallback target the uncompressed files;
+  // the default gzip:true would look for `*.traineddata.gz` (which we do NOT
+  // ship) and fail with ENOENT. The dir must exist for the cache write-back.
   const tessdataDir = config.tessdataDir;
   try {
     fs.mkdirSync(tessdataDir, { recursive: true });
@@ -35,44 +35,94 @@ async function extract(record) {
     /* non-fatal: tesseract will just fall back to the CDN */
   }
 
+  // Without an errorHandler, tesseract.js does `throw Error(...)` inside its
+  // worker's message handler on any load/recognize failure. That throw is an
+  // UNCAUGHT exception: it bypasses try/catch and kills the whole worker process
+  // (every in-flight job dies; BullMQ flow parents then cascade as "child
+  // failed"). Supplying one keeps the failure inside the promise chain.
+  const workerOpts = {
+    langPath: tessdataDir,
+    cachePath: tessdataDir,
+    gzip: false,
+    errorHandler: (err) => {
+      logger.error({ id: record.id, err: String(err) }, 'tesseract worker error');
+    },
+    logger: () => {},
+  };
+
   let result;
   try {
-    result = await withTimeout(
-      Tesseract.recognize(imgPath, 'eng', {
-        langPath: tessdataDir,
-        cachePath: tessdataDir,
-        gzip: false, // load the uncompressed eng.traineddata we ship (see above)
-        // Without an errorHandler, tesseract.js does `throw Error(...)` inside its
-        // worker's message handler on any load/recognize failure. That throw is an
-        // UNCAUGHT exception: it bypasses this try/catch and kills the whole worker
-        // process (every in-flight job dies; BullMQ flow parents then cascade as
-        // "child failed"). Supplying one keeps the failure inside the promise chain
-        // so we can fail just this job.
-        errorHandler: (err) => {
-          logger.error({ id: record.id, err: String(err) }, 'tesseract worker error');
-        },
-        logger: (m) => {
-          if (m.status === 'recognizing text' && m.progress === 1) {
-            logger.debug({ id: record.id }, 'tesseract: recognition complete');
-          }
-        },
-      }),
-      config.tesseractTimeoutMs
-    );
+    result = await withTimeout(runOcr(record, imgPath, workerOpts), config.tesseractTimeoutMs);
   } catch (err) {
     // Surface as a normal rejection so the pipeline marks the job failed and the
     // worker stays alive to process other receipts.
     throw new Error(`tesseract OCR failed: ${err && err.message ? err.message : err}`);
   }
 
-  const rawText = result?.data?.text || '';
-  return { rawText, structured: null };
+  return { rawText: result, structured: null };
+}
+
+/**
+ * Detect orientation (best-effort), then recognize with it corrected.
+ */
+async function runOcr(record, imgPath, workerOpts) {
+  let rotateRadians = 0;
+  if (config.tesseractOsd) {
+    const orient = await detectOrientation(record, imgPath, workerOpts);
+    if (orient && orient.degrees && orient.confidence >= config.tesseractOsdMinConfidence) {
+      rotateRadians = (orient.degrees * Math.PI) / 180;
+    }
+  }
+
+  // Recognize with the LSTM-only model (oem 1 -> the lighter, cleaner core).
+  // rotateRadians corrects the OSD-detected quadrant; when there's nothing to
+  // correct, rotateAuto fixes residual skew instead (the two are mutually
+  // exclusive in tesseract.js). NB: recognition options must go to
+  // worker.recognize() — the Tesseract.recognize() convenience drops them.
+  const worker = await createWorker('eng', 1, workerOpts);
+  try {
+    const recOpts = rotateRadians ? { rotateRadians } : { rotateAuto: true };
+    const { data } = await worker.recognize(imgPath, recOpts);
+    logger.debug({ id: record.id, rotateRadians }, 'tesseract: recognition complete');
+    return data.text || '';
+  } finally {
+    await worker.terminate();
+  }
+}
+
+/**
+ * Run Tesseract OSD to find the page rotation in 90° steps. Uses the legacy/OSD
+ * core (oem 0) + osd.traineddata; recognition stays on the LSTM core because the
+ * OSD core produces noisier text. Best-effort: returns null (skip orientation
+ * correction) if osd.traineddata is missing or detection throws.
+ *
+ * @returns {Promise<{ degrees: number, confidence: number }|null>}
+ */
+async function detectOrientation(record, imgPath, workerOpts) {
+  let worker;
+  try {
+    worker = await createWorker('osd', 0, workerOpts);
+    const { data } = await worker.detect(imgPath);
+    // Snap to the nearest quadrant and normalize to [0, 360).
+    const degrees = (((Math.round((data.orientation_degrees || 0) / 90) * 90) % 360) + 360) % 360;
+    const confidence = data.orientation_confidence ?? 0;
+    logger.debug({ id: record.id, degrees, confidence }, 'tesseract: OSD orientation');
+    return { degrees, confidence };
+  } catch (err) {
+    logger.warn(
+      { id: record.id, err: String(err && err.message ? err.message : err) },
+      'tesseract: OSD unavailable — skipping orientation correction'
+    );
+    return null;
+  } finally {
+    if (worker) await worker.terminate();
+  }
 }
 
 /**
  * Reject if `promise` doesn't settle within `ms`. tesseract.js has no internal
  * timeout, and with an errorHandler set a *language-load* failure leaves its
- * startup promise unsettled (the library swallows that rejection), so the call
+ * startup promise unsettled (the library swallows that rejection), so a call
  * would otherwise hang forever. This bounds it.
  */
 function withTimeout(promise, ms) {

@@ -13,6 +13,21 @@ matching asset for this project (tesseract.js 5.x, LSTM-only) is:
 
     https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng/4.0.0_best_int/eng.traineddata.gz
 
+## Orientation data (recommended) — `osd.traineddata`
+
+The OCR path runs Tesseract's OSD (orientation & script detection) so a sideways
+or upside-down phone photo is auto-rotated before recognition. That needs
+`osd.traineddata` in this directory (uncompressed, ~10 MB). Without it the code
+still runs — it just logs a warning and skips orientation correction (set
+`TESSERACT_OSD=0` to skip it deliberately). Fetch it from the official Tesseract
+data repo:
+
+    curl -fL https://raw.githubusercontent.com/tesseract-ocr/tessdata/main/osd.traineddata -o osd.traineddata
+
+Both `*.traineddata` files are gitignored (they're large binaries), so each
+build environment must place them here before `docker build` / `podman build`
+copies them into the image.
+
 See `../test/README.md` ("Corporate TLS proxy gotcha") for the Colab snippet and
 the full story. Once the file is here:
 
