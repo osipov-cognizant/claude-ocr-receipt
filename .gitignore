@@ -34,3 +34,6 @@ Thumbs.db
 
 # Temp/scratch files
 tmp_*.js
+
+# Local git worktrees (never push)
+.claude/worktrees/
