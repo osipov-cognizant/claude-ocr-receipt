@@ -136,6 +136,43 @@ test('POST applyProfile?dryRun=1 -> 200 but does NOT persist', async () => {
   assert.equal(list.length, 0, 'dry run leaves nothing on disk');
 });
 
+async function seedCostcoWithDiscount() {
+  const rec = await store.createReceipt({
+    buffer: Buffer.alloc(16, 1),
+    mimeType: 'image/png',
+    originalName: 'r.png',
+    source: 'test',
+  });
+  await store.update(rec.id, {
+    status: 'done',
+    store: { name: 'COSTCO WHOLESALE', date: '2026-05-26' },
+    items: [
+      { description: 'SAN PELL MIN', sku: '975416', qty: null, unitPrice: null, price: 23.74, enrichment: null },
+      { description: 'Discount 975416', sku: '0000372064', qty: null, unitPrice: null, price: -5.75, enrichment: null },
+    ],
+    totals: { subtotal: 17.99, tax: 0, total: 17.99, itemCount: 2, sumOfItems: 17.99, subtotalMatch: true },
+  });
+  return rec.id;
+}
+
+test('GET profileResults/:profileId/view renders HTML with the discount folded in', async () => {
+  const id = await seedCostcoWithDiscount();
+  // No stored result yet -> the view computes it fresh (dryRun).
+  const res = await fetch(`${base}/receipts/${id}/profileResults/routesTest1/view`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type') || '', /html/);
+  const html = await res.text();
+  assert.ok(html.includes('Profile applied'), 'profile banner rendered');
+  assert.ok(html.includes('promo'), 'discount surfaced on the line');
+  assert.ok(html.includes('$17.99'), 'net price shown');
+  assert.ok(!/Discount 975416/.test(html), 'no separate discount row');
+});
+
+test('GET profileResults/:profileId/view -> 404 for unknown receipt', async () => {
+  const res = await fetch(`${base}/receipts/nope/profileResults/routesTest1/view`);
+  assert.equal(res.status, 404);
+});
+
 test('applyProfile -> 404 for unknown receipt or unknown profile', async () => {
   const id = await seedDoneReceipt();
   assert.equal((await post(`/api/receipts/nope/applyProfile/routesTest1`)).status, 404);

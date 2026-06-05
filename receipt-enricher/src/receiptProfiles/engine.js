@@ -11,7 +11,7 @@ function deepCopy(v) {
 
 // Fields we report diffs on (everything a transformer is expected to touch).
 const STORE_FIELDS = ['name', 'date'];
-const ITEM_FIELDS = ['description', 'sku', 'qty', 'unitPrice', 'price'];
+const ITEM_FIELDS = ['description', 'sku', 'qty', 'unitPrice', 'price', 'discount'];
 
 // Mirrors parser.finalize so a profile result reports totals like a parse does.
 const SUBTOTAL_TOLERANCE = 0.02;
@@ -37,6 +37,66 @@ function norm(v) {
   return v === undefined ? null : v;
 }
 
+// Identity used to align items across a transform. Prefer the item number
+// (stable across renames and price edits, so a rewrite shows as a field change),
+// and fall back to the description when there's no SKU. This lets an inserted or
+// removed line — e.g. a discount line folded into its item — show as a clean
+// add/remove instead of cascading into bogus positional "renames".
+function itemIdent(it) {
+  const sku = norm(it && it.sku);
+  if (sku !== null && String(sku).trim() !== '') return 's:' + String(sku).trim();
+  return 'd:' + String(norm(it && it.description) ?? '');
+}
+
+function itemFieldChanges(b, a, itemIndex) {
+  const out = [];
+  for (const k of ITEM_FIELDS) {
+    if (norm(b[k]) !== norm(a[k])) {
+      out.push({ field: `item.${k}`, from: norm(b[k]), to: norm(a[k]), itemIndex });
+    }
+  }
+  return out;
+}
+
+// Align the before/after item lists by LCS over their identities (lists are
+// short), then report field changes on matched pairs and add/remove on the rest.
+function diffItems(bi, ai) {
+  const n = bi.length;
+  const m = ai.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] =
+        itemIdent(bi[i]) === itemIdent(ai[j])
+          ? dp[i + 1][j + 1] + 1
+          : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const changes = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (itemIdent(bi[i]) === itemIdent(ai[j])) {
+      changes.push(...itemFieldChanges(bi[i], ai[j], j));
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      changes.push({ field: 'item', from: norm(bi[i].description), to: null, itemIndex: i, removed: true });
+      i++;
+    } else {
+      changes.push({ field: 'item', from: null, to: norm(ai[j].description), itemIndex: j, added: true });
+      j++;
+    }
+  }
+  for (; i < n; i++) {
+    changes.push({ field: 'item', from: norm(bi[i].description), to: null, itemIndex: i, removed: true });
+  }
+  for (; j < m; j++) {
+    changes.push({ field: 'item', from: null, to: norm(ai[j].description), itemIndex: j, added: true });
+  }
+  return changes;
+}
+
 function diff(before, after) {
   const changes = [];
 
@@ -48,24 +108,7 @@ function diff(before, after) {
     }
   }
 
-  const bi = before.items || [];
-  const ai = after.items || [];
-  const n = Math.min(bi.length, ai.length);
-  for (let i = 0; i < n; i++) {
-    for (const k of ITEM_FIELDS) {
-      if (norm(bi[i][k]) !== norm(ai[i][k])) {
-        changes.push({ field: `item.${k}`, from: norm(bi[i][k]), to: norm(ai[i][k]), itemIndex: i });
-      }
-    }
-  }
-  // Item added/removed by the transformer (uncommon, but recorded).
-  for (let i = n; i < ai.length; i++) {
-    changes.push({ field: 'item', from: null, to: norm(ai[i].description), itemIndex: i, added: true });
-  }
-  for (let i = n; i < bi.length; i++) {
-    changes.push({ field: 'item', from: norm(bi[i].description), to: null, itemIndex: i, removed: true });
-  }
-
+  changes.push(...diffItems(before.items || [], after.items || []));
   return changes;
 }
 

@@ -104,6 +104,60 @@ test('renderReceipt shows an error banner and status for a failed receipt', () =
   assert.ok(html.includes('No line items yet'), 'empty-state shown when no items');
 });
 
+test('renderReceipt surfaces a folded-in discount on the line item', () => {
+  const record = sampleRecord({
+    items: [{ description: 'SAN PELL MIN', sku: '975416', price: 17.99, discount: -5.75, enrichment: null }],
+    totals: { subtotal: 17.99, tax: 0, total: 17.99, itemCount: 1, sumOfItems: 17.99, subtotalMatch: true },
+    summary: null,
+  });
+  const html = view.renderReceipt(record);
+  assert.match(html, /promo/i, 'discount labelled');
+  assert.ok(html.includes('$5.75'), 'discount amount shown');
+  assert.ok(html.includes('$23.74'), 'pre-discount price struck through');
+  assert.ok(html.includes('$17.99'), 'net price shown');
+});
+
+test('renderProfileResult renders the transformed receipt with a profile banner', () => {
+  const record = sampleRecord();
+  const result = {
+    receiptId: record.id,
+    profileId: 'rp_abc',
+    profileName: 'usGrocery1',
+    transformer: 'usGrocery',
+    store: { name: 'Costco', date: '05-26-2026' },
+    items: [
+      { description: 'SAN PELL MIN', sku: '975416', price: 17.99, discount: -5.75, enrichment: null },
+      { description: 'BUTTER CROISS', sku: '1199652', price: 5.99, enrichment: null },
+    ],
+    totals: { subtotal: 23.98, tax: 0, total: 23.98, itemCount: 2, sumOfItems: 23.98, subtotalMatch: true },
+    changes: [],
+  };
+  const html = view.renderProfileResult(record, result);
+  assert.match(html, /^<!doctype html>/i);
+  assert.ok(html.includes('Profile applied'), 'banner present');
+  assert.ok(html.includes('usGrocery1'), 'profile name shown');
+  assert.ok(html.includes('1 discount folded'), 'folded-discount count noted');
+  assert.ok(html.includes('promo'), 'discount shown on the line');
+  assert.ok(html.includes(`/receipts/${record.id}/view`), 'links back to the raw receipt');
+  assert.ok(html.includes(`/api/receipts/${record.id}/profileResults/rp_abc`), 'links to result JSON');
+});
+
+test('renderProfileResult escapes profile and store text', () => {
+  const record = sampleRecord();
+  const html = view.renderProfileResult(record, {
+    receiptId: record.id,
+    profileId: 'rp_x',
+    profileName: '<script>x</script>',
+    transformer: 'usGrocery',
+    store: { name: '<b>store</b>', date: null },
+    items: [],
+    totals: {},
+    changes: [],
+  });
+  assert.ok(!html.includes('<script>x</script>'), 'profile name escaped');
+  assert.ok(html.includes('&lt;script&gt;'));
+});
+
 test('renderList renders rows for each receipt and an empty state', () => {
   const rows = view.renderList([
     sampleRecord(),

@@ -61,6 +61,7 @@ queued  ──►  processing  ──►  done
 | `POST` | `/api/receipts/:id/applyProfile/:profileId` | Apply a profile to a receipt (`?dryRun=1`, `?async=1`) | JSON / `202` |
 | `GET`  | `/api/receipts/:id/profileResults` | List profile results for a receipt | JSON array |
 | `GET`  | `/api/receipts/:id/profileResults/:profileId` | One profile result | JSON |
+| `GET`  | `/receipts/:id/profileResults/:profileId/view` | HTML view of the receipt with the profile applied | HTML |
 
 The profile endpoints are documented in **[Receipt Profiles](#receipt-profiles)** below.
 
@@ -221,8 +222,9 @@ Point it at another host with `API_URL=http://my-host:8080 ./cli/receipts …`.
 ## Receipt Profiles
 
 A **receipt profile** canonicalizes a parsed receipt — normalizing store names,
-date formats, and item descriptions — by running a **transformer** (a small
-TypeScript/JavaScript module shipped with the app). You apply a profile to an
+date formats, and item descriptions, and folding per-item discount lines into the
+item they apply to — by running a **transformer** (a small TypeScript/JavaScript
+module shipped with the app). You apply a profile to an
 already-processed receipt; the original record is never modified, and the result
 (plus an auto-derived change log) is stored separately. Design details:
 [`docs/RECEIPT-PROFILES.md`](RECEIPT-PROFILES.md).
@@ -244,6 +246,15 @@ curl -fsS "$BASE/api/transformers" | jq .
   { "id": "tesseractGroceryUs", "name": "tesseractGroceryUs", "version": 1,
     "description": "Clean up noisy Tesseract OCR output for US grocery receipts …" } ]
 ```
+
+`usGrocery` also **folds per-item discounts** into the item they apply to, so the
+net price shows on one row instead of a separate negative line. Association is
+store-specific: at **Costco** the discount line sits next to its item and
+references the item's SKU (e.g. `Discount 975416`); at **Sam's Club** a single
+`Instant Savings` line is printed at the bottom and names the item
+(`Dog Chow (Inst Sv)`). The folded amount is recorded on the item's `discount`
+field and surfaced in the HTML view; a discount that can't be matched is left as
+its own line rather than guessed onto the wrong item.
 
 `tesseractGroceryUs` is a derivative of `usGrocery` tuned for the offline
 **Tesseract** pipeline: it strips OCR junk + the embedded SKU code, Title-Cases
@@ -343,7 +354,12 @@ curl -fsS -X POST "$BASE/api/receipts/$ID/applyProfile/usGrocery1?async=1" | jq 
 ```bash
 curl -fsS "$BASE/api/receipts/$ID/profileResults"               # all results
 curl -fsS "$BASE/api/receipts/$ID/profileResults/usGrocery1"    # one (id or name)
+open "$BASE/receipts/$ID/profileResults/usGrocery1/view"        # HTML, discounts folded in
 ```
+
+The `…/view` endpoint renders the profile-applied receipt as HTML — discounts
+fold into their line item (with the pre-discount price struck through). It shows
+the stored result when present, otherwise computes it on the fly (no persistence).
 
 > Profiles and results are durable JSON under `DATA_DIR/receiptProfiles/` and
 > `DATA_DIR/profileResults/<receiptId>/`. Applying a profile is **synchronous by

@@ -82,8 +82,8 @@ The shipped example, `usGrocery.ts`:
 ```ts
 import type { Transform, TransformerMeta } from './types';
 
-export const meta: TransformerMeta = { name: 'usGrocery', version: 1,
-  description: 'Normalize common US grocery receipts (store name + date) and a context-sensitive item rewrite.' };
+export const meta: TransformerMeta = { name: 'usGrocery', version: 2,
+  description: 'Normalize common US grocery receipts (store name + date), fold per-item discounts into the discounted item, and a context-sensitive item rewrite.' };
 
 const STORE_ALIASES: Record<string, string[]> = {
   Costco: ['costco wholesale', 'costco'],
@@ -105,11 +105,23 @@ export const transform: Transform = (receipt) => {
   }
   // 2. Reformat the date YYYY-MM-DD -> MM-DD-YYYY.
   if (store.date) store.date = store.date.replace(/^(\d{4})-(\d{2})-(\d{2})$/, '$2-$3-$1');
-  // 3. Context-sensitive: at Costco, "water" -> "Water 5 Liter".
-  if (store.name === 'Costco') for (const it of items) if (/water/i.test(it.description)) it.description = 'Water 5 Liter';
+  // 3. Fold per-item discount lines into the discounted item (store-specific).
+  receipt.items = foldDiscounts(store, items, ctx.log);
+  // 4. Context-sensitive: at Costco, "water" -> "Water 5 Liter".
+  if (store.name === 'Costco') for (const it of receipt.items) if (/water/i.test(it.description)) it.description = 'Water 5 Liter';
   return receipt;
 };
 ```
+
+**Discount folding** (`foldDiscounts`) is a worked example of store-specific
+control flow. A receipt often lists a per-item promo as its own negative-price
+line; the transformer merges it into the item it applies to (adding the negative
+amount to `price` and recording it on the item's `discount` field) and drops the
+line, so the net price shows on one row. The matching rule differs by chain — at
+**Costco** the discount sits next to its item and references the item's SKU
+(`Discount 975416`); at **Sam's Club** a single `Instant Savings` line at the
+bottom names the item (`Dog Chow (Inst Sv)`), matched by description. A discount
+that can't be confidently matched is left as its own line.
 
 **Runtime TypeScript.** Transformers may be `.ts`; the registry enables them via
 `require('tsx/cjs')` (the `tsx` runtime loader, a dependency). `.js` transformers
@@ -132,8 +144,11 @@ to repair provider-specific extraction noise without touching the OCR pipeline.
 1. Deep-copies the record's `{ store, items, totals }` (source is never mutated).
 2. Runs the transformer against the copy.
 3. **Diffs** input → output over the known fields (`store.name/date`,
-   `item.description/sku/qty/unitPrice/price`) to build the `changes` audit
-   trail — including item add/remove.
+   `item.description/sku/qty/unitPrice/price/discount`) to build the `changes`
+   audit trail. Items are aligned by identity (SKU, falling back to description)
+   via an LCS, so a rename shows as a field change while an inserted/removed line
+   — e.g. a folded-in discount — shows as a clean add/remove instead of a
+   positional cascade.
 4. **Recomputes totals** (`itemCount`, `sumOfItems`, `subtotalMatch`) the same
    way `parser.finalize()` does.
 

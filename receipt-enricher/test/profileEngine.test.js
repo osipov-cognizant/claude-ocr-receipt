@@ -98,6 +98,42 @@ test('passes config and receiptId through ctx', () => {
   assert.deepEqual(seen.config, { k: 1 });
 });
 
+test('a mid-list removal reports a clean remove, not a positional cascade', () => {
+  // Remove items[1] (e.g. a discount line folded into the line before it). The
+  // alignment keys on SKU, so the surviving items still match by identity.
+  const out = applyProfile(sampleRecord(), (r) => {
+    r.items[0].price = 4.99 - 1; // net after a folded discount
+    r.items.splice(1, 1);
+  }, noCtx);
+  const removed = out.changes.filter((c) => c.removed);
+  assert.equal(removed.length, 1, 'exactly one removal');
+  assert.equal(removed[0].from, 'US WAGYU BEEF');
+  // The kept item shows only its real change, no bogus rename.
+  const renames = out.changes.filter((c) => c.field === 'item.description');
+  assert.equal(renames.length, 0, 'no spurious description changes');
+  const priceChange = out.changes.find((c) => c.field === 'item.price');
+  assert.equal(priceChange.itemIndex, 0);
+});
+
+test('aligns by SKU so a rename is a field change, not remove+add', () => {
+  const out = applyProfile(sampleRecord(), (r) => { r.items[0].description = 'Renamed'; }, noCtx);
+  assert.equal(out.changes.filter((c) => c.added || c.removed).length, 0);
+  const c = out.changes.find((x) => x.field === 'item.description');
+  assert.equal(c.itemIndex, 0);
+  assert.equal(c.to, 'Renamed');
+});
+
+test('reports a folded-in discount on the item.discount field', () => {
+  const out = applyProfile(sampleRecord(), (r) => {
+    r.items[0].price = 3.99;
+    r.items[0].discount = -1;
+  }, noCtx);
+  const d = out.changes.find((c) => c.field === 'item.discount');
+  assert.equal(d.from, null);
+  assert.equal(d.to, -1);
+  assert.equal(d.itemIndex, 0);
+});
+
 test('handles a record with no store/items without throwing', () => {
   const out = applyProfile({ id: 'x', store: null, items: [], totals: null }, normalize, noCtx);
   assert.equal(out.items.length, 0);

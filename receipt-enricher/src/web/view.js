@@ -68,7 +68,11 @@ a:hover{text-decoration:underline}
 .item .name{font-weight:700}
 .item .sub{color:var(--muted); font-size:12px; margin-top:2px}
 .item .snip{font-size:12px; margin-top:6px; font-family:"Fraunces",serif; color:#4a4234}
-.item .price{font-weight:700; white-space:nowrap}
+.item .disc{color:var(--accent); font-size:12px; margin-top:2px}
+.item .price{font-weight:700; white-space:nowrap; text-align:right}
+.item .price .was{display:block; color:var(--muted); font-weight:400; font-size:12px; text-decoration:line-through}
+.banner{margin:6px 0 0; padding:10px 12px; border:1px solid var(--line); border-radius:4px; background:var(--paper-2); font-size:13px}
+.banner .lead{font-weight:700}
 .totals{margin-top:18px; border-top:2px dashed var(--line); padding-top:14px}
 .totals .row{display:flex; justify-content:space-between; padding:3px 0}
 .totals .grand{font-size:18px; font-weight:700; border-top:1px solid var(--line); margin-top:6px; padding-top:8px}
@@ -98,26 +102,31 @@ function itemRow(it) {
   const snip = it.enrichment && (it.enrichment.snippet || it.enrichment.imageDescription)
     ? `<div class="snip">${esc(it.enrichment.snippet || it.enrichment.imageDescription)}${it.enrichment.url ? ` <a href="${esc(it.enrichment.url)}" target="_blank" rel="noopener">↗</a>` : ''}</div>`
     : '';
+  // A folded-in discount (negative): show the saving on the line and strike the
+  // pre-discount price, so it lives in the item row rather than a separate line.
+  const hasDiscount = typeof it.discount === 'number' && it.discount < 0;
+  const disc = hasDiscount
+    ? `<div class="disc">promo &minus;${money(Math.abs(it.discount))}</div>`
+    : '';
+  const priceCell = hasDiscount && it.price != null
+    ? `<span class="was">${money(it.price - it.discount)}</span>${money(it.price)}`
+    : money(it.price);
   return `<div class="item">
     ${thumb}
     <div class="body">
       <div class="name">${esc(it.description)}</div>
       ${sub.length ? `<div class="sub">${sub.join(' · ')}</div>` : ''}
+      ${disc}
       ${snip}
     </div>
-    <div class="price">${money(it.price)}</div>
+    <div class="price">${priceCell}</div>
   </div>`;
 }
 
-function renderReceipt(record) {
-  const t = record.totals || {};
-  const itemsHtml = record.items && record.items.length
-    ? record.items.map(itemRow).join('')
-    : `<p class="empty-note">No line items yet. Status: ${esc(record.status)}.</p>`;
-
-  // Surface the subtotal-reconciliation signal. A shortfall (items summing
-  // under the printed subtotal) is flagged as a likely missing line; an overage
-  // is expected when a discount/savings line was excluded.
+// Subtotal/total block + the reconciliation signal. A shortfall (items summing
+// under the printed subtotal) is flagged as a likely missing line; an overage is
+// expected when a discount/savings line was excluded (or not yet folded in).
+function totalsBlock(t) {
   let reconcile = '';
   if (t.subtotalMatch === true) {
     reconcile = `<div class="row reconcile ok"><span>✓ items reconcile</span><span>matches subtotal</span></div>`;
@@ -126,16 +135,22 @@ function renderReceipt(record) {
       ? `<div class="row reconcile warn"><span>⚠ under subtotal by ${money(t.subtotal - t.sumOfItems)}</span><span>a line may be missing</span></div>`
       : `<div class="row reconcile note"><span>items exceed subtotal by ${money(t.sumOfItems - t.subtotal)}</span><span>excludes discounts</span></div>`;
   }
-
-  const totals = record.items && record.items.length
-    ? `<div class="totals">
+  return `<div class="totals">
         <div class="row"><span>Subtotal</span><span>${money(t.subtotal)}</span></div>
         <div class="row"><span>Tax</span><span>${money(t.tax)}</span></div>
         <div class="row"><span>Sum of items</span><span>${money(t.sumOfItems)}</span></div>
         ${reconcile}
         <div class="row grand"><span>Total</span><span>${money(t.total != null ? t.total : t.sumOfItems)}</span></div>
-      </div>`
-    : '';
+      </div>`;
+}
+
+function renderReceipt(record) {
+  const t = record.totals || {};
+  const itemsHtml = record.items && record.items.length
+    ? record.items.map(itemRow).join('')
+    : `<p class="empty-note">No line items yet. Status: ${esc(record.status)}.</p>`;
+
+  const totals = record.items && record.items.length ? totalsBlock(t) : '';
 
   return HEAD + `
   <p><a href="/">← all receipts</a></p>
@@ -149,6 +164,35 @@ function renderReceipt(record) {
     ${totals}
   </div>
   <p style="margin-top:14px"><a href="/api/receipts/${esc(record.id)}">view raw JSON</a> · <a href="/receipts/${esc(record.id)}/image" target="_blank" rel="noopener">view original photo</a> · <span class="pill">${esc(record.image?.originalName || record.image?.file)}</span></p>
+  ` + FOOT;
+}
+
+// Render a receipt as transformed by an applied profile. Items, store and totals
+// come from the profile RESULT (so folded discounts show on the line they belong
+// to); identity/photo context comes from the underlying receipt record.
+function renderProfileResult(record, result) {
+  const t = result.totals || {};
+  const items = result.items || [];
+  const folded = items.filter((it) => typeof it.discount === 'number' && it.discount < 0).length;
+  const itemsHtml = items.length
+    ? items.map(itemRow).join('')
+    : `<p class="empty-note">No line items.</p>`;
+  const totals = items.length ? totalsBlock(t) : '';
+
+  return HEAD + `
+  <p><a href="/receipts/${esc(record.id)}/view">← raw receipt</a> · <a href="/">all receipts</a></p>
+  <div class="ticket">
+    <div class="banner">
+      <span class="lead">Profile applied:</span> ${esc(result.profileName || result.profileId)}
+      <span class="pill">${esc(result.transformer || '')}</span>
+      ${folded ? ` · ${esc(folded)} discount${folded === 1 ? '' : 's'} folded into item prices` : ''}
+    </div>
+    <h2 class="store" style="margin-top:14px">${esc(result.store?.name || 'Unknown store')}</h2>
+    <div class="meta">${esc(result.store?.date || '')} · id ${esc(record.id)} · via ${esc(record.source)} · ${esc(record.extraction?.provider || 'pending')}</div>
+    <div class="items">${itemsHtml}</div>
+    ${totals}
+  </div>
+  <p style="margin-top:14px"><a href="/api/receipts/${esc(record.id)}/profileResults/${esc(result.profileId)}">view result JSON</a> · <a href="/receipts/${esc(record.id)}/image" target="_blank" rel="noopener">view original photo</a></p>
   ` + FOOT;
 }
 
@@ -170,4 +214,4 @@ function renderList(records) {
   ` + FOOT;
 }
 
-module.exports = { renderReceipt, renderList, esc };
+module.exports = { renderReceipt, renderProfileResult, renderList, esc };

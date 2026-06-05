@@ -108,11 +108,21 @@ export PATH="$PWD/cli:$PATH"      # or: alias receipts="$PWD/cli/receipts"
 # 4. Check health, then upload a receipt photo
 receipts health
 receipts upload ~/Pictures/costco-receipt.jpg --wait
+
+# 5. (optional) Upload and apply a receipt profile after OCR.
+#    "usGrocery1" is seeded on first boot; it canonicalizes the store/date and
+#    folds per-item discounts into the discounted line.
+receipts upload ~/Pictures/costco-receipt.jpg --wait --profile usGrocery1
 ```
 
 `upload --wait` blocks until processing finishes and prints the record plus a
 `view:` URL. Open it in a browser, or just visit <http://localhost:8080> to see
 all receipts.
+
+With `--profile`, the worker runs OCR **then** applies the profile, and the
+command also prints a `profile view:` URL — the HTML receipt with the profile
+applied (discounts folded into their line items). Run `receipts list` or visit
+<http://localhost:8080> to confirm the receipt was processed.
 
 ---
 
@@ -140,7 +150,9 @@ with `ANTHROPIC_MODEL`, or set `VISION_PROVIDER=openai` with `OPENAI_API_KEY`.
 ### CLI
 
 ```bash
-receipts upload <image> [--wait]   # upload a photo, optionally wait for results
+receipts upload <image> [--wait] [--profile <id|name>]
+                                   # upload a photo; --wait blocks for results,
+                                   # --profile applies a receipt profile after OCR
 receipts status <id>               # full JSON record
 receipts list                      # recent receipts
 receipts wait <id>                 # poll until done/failed
@@ -176,10 +188,15 @@ Telegram-side you can actually open (not `localhost` if you're on your phone).
 curl -F "receipt=@receipt.jpg" http://localhost:8080/api/receipts
 # -> 202 { "id": "...", "status": "queued", "statusUrl": "...", "viewUrl": "..." }
 
+# Upload and apply a receipt profile after OCR (add a "profileId" field)
+curl -F "receipt=@receipt.jpg" -F "profileId=usGrocery1" http://localhost:8080/api/receipts
+# -> 202 { "id": "...", "profileId": "rp_...", "profileResultUrl": "...", ... }
+
 curl http://localhost:8080/api/receipts/<id>     # one record (JSON)
 curl http://localhost:8080/api/receipts          # list
-# Web view:        http://localhost:8080/receipts/<id>/view
-# Original photo:  http://localhost:8080/receipts/<id>/image
+# Web view:           http://localhost:8080/receipts/<id>/view
+# Profile-applied view: http://localhost:8080/receipts/<id>/profileResults/usGrocery1/view
+# Original photo:     http://localhost:8080/receipts/<id>/image
 ```
 
 ---

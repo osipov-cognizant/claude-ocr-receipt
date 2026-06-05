@@ -8,6 +8,7 @@ const resultStore = require('../receiptProfiles/resultStore');
 const registry = require('../receiptProfiles/registry');
 const { applyProfileToReceipt } = require('../receiptProfiles/applyService');
 const { enqueueApplyProfile } = require('../queue');
+const view = require('../web/view');
 const logger = require('../logger');
 
 const router = express.Router();
@@ -141,6 +142,27 @@ router.get('/api/receipts/:id/profileResults/:profileId', async (req, res, next)
     if (!result) return res.status(404).json({ error: 'not found' });
     res.json(result);
   } catch (err) {
+    next(err);
+  }
+});
+
+// --- Web view of a profile-applied receipt ---------------------------------
+
+// HTML view of a receipt as transformed by a profile (discounts folded into
+// their line items). Renders the stored result when present; otherwise computes
+// it fresh (dryRun, no persistence) so the page always reflects the current
+// transformer. Mirrors the JSON endpoint above.
+router.get('/receipts/:id/profileResults/:profileId/view', async (req, res, next) => {
+  try {
+    const record = await store.get(req.params.id);
+    if (!record) return res.status(404).send('Receipt not found');
+    const profile = await profileStore.get(req.params.profileId);
+    const result =
+      (profile && (await resultStore.get(record.id, profile.id))) ||
+      (await applyProfileToReceipt(req.params.id, req.params.profileId, { dryRun: true }));
+    res.type('html').send(view.renderProfileResult(record, result));
+  } catch (err) {
+    if (err && err.name === 'ApplyError') return res.status(err.status).send(err.message);
     next(err);
   }
 });

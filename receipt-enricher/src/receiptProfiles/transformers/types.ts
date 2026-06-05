@@ -15,6 +15,12 @@ export interface Item {
   unitPrice: number | null;
   price: number | null;
   enrichment: unknown;
+  /**
+   * Total promo/discount folded into this line's `price` by a transformer
+   * (negative). Set when a separate discount line was merged into the item so
+   * the net price shows on one row; the web view surfaces it as a sub-note.
+   */
+  discount?: number | null;
 }
 
 export interface ReceiptDraft {
