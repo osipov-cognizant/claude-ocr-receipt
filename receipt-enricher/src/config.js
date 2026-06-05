@@ -68,6 +68,13 @@ const config = {
   // TESSDATA_PATH (e.g. a mounted volume in Docker).
   tessdataDir: path.resolve(process.env.TESSDATA_PATH || path.join(__dirname, '..', 'tessdata')),
 
+  // Upper bound (ms) on a single Tesseract recognition. tesseract.js has no
+  // built-in timeout: if language data can't be loaded it can hang forever
+  // (e.g. a CDN-blocked download, or an empty/mounted tessdata dir). The OCR
+  // module races the call against this so a stuck recognition fails *that job*
+  // instead of stalling a worker slot indefinitely. Override with TESSERACT_TIMEOUT_MS.
+  tesseractTimeoutMs: Number(process.env.TESSERACT_TIMEOUT_MS) || 120000,
+
   // JSON file mapping canonical store names to their aliases/substrings. The
   // parser uses it to normalize store names (e.g. "Costco Wholesale" -> "Costco")
   // across the vision and OCR paths. Override to ship your own store list.
