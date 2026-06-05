@@ -35,7 +35,7 @@ queued  ──►  processing  ──►  done
 - `failed` — all retries exhausted; `error` holds the reason.
 
 > Uploading enqueues a job on Redis/BullMQ, so the **upload path needs the full
-> stack running** (`docker compose up` / `podman-compose up` — see the README).
+> stack running** (`docker compose up` / `podman-compose -p receipt-enricher up` — see the README).
 > The read endpoints (`GET …`) and the web views only read records from disk and
 > work without Redis.
 

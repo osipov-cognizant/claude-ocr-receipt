@@ -98,7 +98,8 @@ cp .env.example .env
 # 2. Build and start (pick your runtime)
 docker compose up --build -d
 #   — or, with Podman (use the hyphenated wrapper) —
-podman-compose up --build -d
+podman-compose -p receipt-enricher up --build -d
+#   (the explicit -p pins the project name; see "Podman notes" for why)
 
 # 3. Make the CLI handy
 chmod +x cli/receipts
@@ -196,6 +197,12 @@ This stack is built to run rootless under Podman with no special flags:
 - **Unprivileged port** — the API listens on `8080` (rootless can't bind <1024).
 - A `Containerfile` symlink is included since Podman looks for that name by
   default, though `docker-compose.yml` points both runtimes at `Dockerfile`.
+- **Always pass `-p receipt-enricher`** to `podman-compose`. It names the built
+  images `<project>_<service>`, and a stray `RECEIPT_PROJECT` or
+  `COMPOSE_PROJECT_NAME` exported in your shell can poison the project name —
+  e.g. an invalid value yields `Error: tag …: invalid reference format` on
+  build. The explicit `-p` flag overrides both env vars and the compose `name:`,
+  so the build is deterministic regardless of your environment.
 
 **Want the receipt files on your host filesystem** (to inspect the JSON/images)?
 Swap the named volume for a bind mount on the `api` and `worker` services:
@@ -209,7 +216,7 @@ Under **rootless Podman** you'll also likely want the container UID to match
 yours so it can write there:
 
 ```bash
-podman-compose up   # then, if you hit permission errors on ./data:
+podman-compose -p receipt-enricher up   # then, if you hit permission errors on ./data:
 # add to the api & worker services:   userns_mode: "keep-id"
 ```
 

@@ -81,7 +81,7 @@ prints its contents, and each self-skips when its prerequisites are missing
 |--------|---------|-------|
 | 1. Vision model | `ANTHROPIC_API_KEY=sk-... npm run test:live:vision` | a vision API key |
 | 2. Offline Tesseract | `npm run test:live:tesseract` | reachable CDN for first-run data |
-| 3. Full stack | `npm run test:live:stack` | a running stack (`podman-compose up -d`, or `docker compose up -d`) |
+| 3. Full stack | `npm run test:live:stack` | a running stack (`podman-compose -p receipt-enricher up -d`, or `docker compose up -d`) |
 | 4. Sample corpus | `ANTHROPIC_API_KEY=sk-... npm run test:live:samples` | a vision API key |
 | all of them | `npm run test:live` | — |
 
@@ -183,8 +183,8 @@ Full docs in `test/acceptance/README.md`.
 ## Optional: live end-to-end (manual)
 
 The hermetic tests deliberately mock external services. To smoke-test the real
-stack by hand, follow the README quick start (`podman-compose up --build -d`, or
-`docker compose up --build -d`) and upload the sample with the CLI:
+stack by hand, follow the README quick start (`podman-compose -p receipt-enricher
+up --build -d`, or `docker compose up --build -d`) and upload the sample with the CLI:
 
 ```bash
 ./cli/receipts upload samples/costco/PXL_20260526_235419811.jpg --wait

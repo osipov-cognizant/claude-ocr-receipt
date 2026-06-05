@@ -112,15 +112,27 @@ stale). What you need to know:
   `podman-compose` (a pyenv/pip shim) drives the CLI directly and works.
 - `podman-compose` does **not** auto-recreate running containers on `up` (you
   get "container name already in use"). To apply code/compose/env changes:
-  `podman-compose down` then `podman-compose up --build -d`.
+  `podman-compose -p receipt-enricher down` then `podman-compose -p receipt-enricher up --build -d`.
+- **Always pass `-p receipt-enricher`.** podman-compose names built images
+  `<project>_<service>` and resolves the project name from (in order) the `-p`
+  flag → `COMPOSE_PROJECT_NAME` → the compose `name:` (`${RECEIPT_PROJECT:-receipt-enricher}`)
+  → the dir basename. A `RECEIPT_PROJECT` or `COMPOSE_PROJECT_NAME` left exported
+  in your shell silently poisons the name; an invalid value (one not starting
+  with a letter/digit) makes the build fail with `Error: tag
+  _-receipt-enricher_worker: invalid reference format` (podman rejects the image
+  tag — note `redis` still builds since it uses a prebuilt image). The norm regex
+  `[^-_a-z0-9]` keeps leading `_`/`-`, so the junk survives to the tag. `-p` wins
+  over both env vars and `name:`, so it's deterministic regardless of environment.
+  If you skip `-p`, first `echo "$RECEIPT_PROJECT"; echo "$COMPOSE_PROJECT_NAME"`
+  and `unset` any stray value.
 
 ```bash
 export PATH="/opt/podman/bin:$PATH"
 cd receipt-enricher
-podman-compose up --build -d        # redis + api(:8080) + worker
+podman-compose -p receipt-enricher up --build -d   # redis + api(:8080) + worker
 curl -fsS localhost:8080/health | jq .
-podman-compose down                 # stop, KEEP volumes
-podman-compose down -v              # stop + WIPE data volumes (fresh slate)
+podman-compose -p receipt-enricher down            # stop, KEEP volumes
+podman-compose -p receipt-enricher down -v         # stop + WIPE data volumes (fresh slate)
 ```
 
 The compose file is **parameterized** with prod-safe defaults, so the same file
