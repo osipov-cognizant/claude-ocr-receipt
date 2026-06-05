@@ -47,6 +47,17 @@ The flow:
 to offline Tesseract OCR and simply skips enrichment. Add a Tavily key to get
 images; add a vision key for much better item extraction.
 
+**Receipt profiles (optional):** a *profile* runs a code **transformer** that
+canonicalizes a parsed receipt — normalizing store names, dates, and item
+descriptions — and stores the result separately with an auto-derived change log
+(the original record is never modified). Apply one synchronously to an
+already-processed receipt, asynchronously (`?async=1`), or pass a `profileId` at
+upload time to run it automatically **after** OCR via a BullMQ flow
+(`process-receipt` child → `applyProfile` parent). Two transformers ship today:
+`usGrocery` (vision-clean receipts) and `tesseractGroceryUs` (repairs noisy
+Tesseract output). See [`docs/RECEIPT-PROFILES.md`](docs/RECEIPT-PROFILES.md) and
+the API reference in [`docs/API.md`](docs/API.md).
+
 ---
 
 ## Components
@@ -223,6 +234,7 @@ All via `.env` (see `.env.example`). Highlights:
 | `ENRICH_MAX_ITEMS`   | `40`                     | cap Tavily lookups per receipt               |
 | `QUEUE_CONCURRENCY`  | `2`                      | parallel receipts in the worker              |
 | `JOB_ATTEMPTS`       | `3`                      | retries with exponential backoff             |
+| `DEFAULT_PROFILE_ID` | —                        | receipt profile (id or name) applied to uploads that omit one |
 | `TELEGRAM_BOT_TOKEN` | —                        | enables the bot service                      |
 
 Inside compose, `REDIS_URL` and `DATA_DIR` are set for you. The compose file also
@@ -256,7 +268,8 @@ npm run bot
   `:stack` / `:samples` — hit real services and self-skip when prereqs are absent.
 - **Acceptance (black-box, containerized):** `bash test/acceptance/run-all.sh`
   builds the stack in containers and drives it from the outside via the CLI and
-  raw `curl` (upload → process → done, plus error cases), then tears it down. It
+  raw `curl` (upload → process → done, error cases, and receipt profiles), then
+  tears it down. It
   runs **isolated from any live deployment** — its own project name
   (`test-receipt-enricher`) and host port (`18080`) — so it's safe to run on the
   same host as a running stack. Defaults to offline Tesseract; pass `--vision`
@@ -308,6 +321,8 @@ receipt-enricher/
    ├─ ocr/                 # vision + tesseract providers
    ├─ parse/               # structured/heuristic receipt parser
    ├─ enrich/              # Tavily client + cache
+   ├─ receiptProfiles/     # profile engine, registry, stores, apply service, transformers/
+   ├─ routes/              # REST + web view route modules
    └─ web/                 # server-rendered receipt views
 ```
 

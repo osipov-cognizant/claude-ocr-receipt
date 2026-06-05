@@ -30,6 +30,21 @@ extraction paths are tested against one source of truth.
 | `config.test.js`     | `config`              | the README "which keys → which mode" matrix (nothing / Tavily / Anthropic / OpenAI / both / overrides) |
 | `view.test.js`       | `web/view`            | HTML rendering of items/totals/enrichment images, list + empty states, **HTML-escaping against injection from receipt text**, subtotal reconciliation note (shortfall warning / overage / ✓ match) |
 
+### Receipt Profiles ([docs/RECEIPT-PROFILES.md](../docs/RECEIPT-PROFILES.md))
+
+| File | Layer | Highlights |
+|------|-------|-----------|
+| `profileEngine.test.js`        | `receiptProfiles/engine`   | runs a transform fn; **auto-diffed `changes`**, totals recompute, source immutability, return-new-draft, numeric diffs, ctx passthrough |
+| `transformerRegistry.test.js`  | `receiptProfiles/registry` | loads the shipped `usGrocery.ts` via the runtime TS loader; `types` not registered; unknown id → null |
+| `tesseractGroceryUs.test.js`   | transformer                | `tesseractGroceryUs` cleanup on real Tesseract-shaped items: strips junk + SKU code, Title-Cases, expands abbreviations, **infers Costco from KS items**, cleanup invariants |
+| `profileValidate.test.js`      | `receiptProfiles/validate` | name/transformer/config validation |
+| `profileStore.test.js`         | `receiptProfiles/profileStore` | CRUD + version bump + unknown-transformer rejection |
+| `profileSeed.test.js` / `profileResultStore.test.js` | profile + result stores | first-boot seeding; result save/get/list keyed by profile id |
+| `profileRoutes.test.js`        | `routes` (HTTP)            | full profile HTTP surface incl. `/api/transformers`, sync `applyProfile`, `?dryRun=1` |
+| `applyService.test.js`         | `receiptProfiles/applyService` | shared apply service (sync route + worker): applies + persists, resolves by id/name, dryRun, **never mutates the source record**, `ApplyError` 404s |
+| `workerDispatch.test.js`       | `worker`                   | pure `dispatch(job)` routes on `job.name` (`process-receipt` vs `applyProfile`) **without Redis**; unknown name throws |
+| `uploadProfile.test.js`        | `routes` (HTTP)            | upload with `profileId` enqueues the **OCR→profile flow** (unknown profile → 400, `DEFAULT_PROFILE_ID` fallback); `applyProfile?async=1` → `202` |
+
 ## Hermetic by design
 
 Tests run **offline with no API keys and no Redis**:

@@ -18,7 +18,16 @@ test/acceptance/
 │  ├─ 10_health.sh  20_upload.sh  30_list.sh  40_view.sh
 └─ rest/             # driven through raw curl
    ├─ 10_health.sh  20_upload.sh  30_list.sh  40_image.sh  50_view.sh  60_errors.sh
+   ├─ 70_applyProfile.sh        # apply a profile to a processed receipt (sync)
+   ├─ 80_uploadWithProfile.sh   # upload with profileId → OCR-then-profile BullMQ flow
+   └─ 81_tesseractProfile.sh    # tesseractGroceryUs cleanup profile (Tesseract mode only)
 ```
+
+Steps auto-discover: `run-all.sh` runs every `cli/*.sh` then `rest/*.sh` in name
+order. The profile-content assertions in `70`/`80` only run under `--vision`
+(under Tesseract the store name is unreadable, so `usGrocery` is a near no-op);
+`81` is the reverse — it exercises the `tesseractGroceryUs` cleanup profile and
+**skips under `--vision`**.
 
 ## Isolation from production (run it on a host that already runs the app)
 

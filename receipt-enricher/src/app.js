@@ -4,6 +4,8 @@ const express = require('express');
 const config = require('./config');
 const logger = require('./logger');
 const receipts = require('./routes/receipts');
+const receiptProfiles = require('./routes/receiptProfiles');
+const profileStore = require('./receiptProfiles/profileStore');
 const { cache } = require('./redis');
 
 /**
@@ -25,16 +27,24 @@ function createApp() {
       redis = 'down';
     }
     const ok = redis === 'up';
+    let receiptProfileCount = 0;
+    try {
+      receiptProfileCount = await profileStore.count();
+    } catch {
+      /* a profile-store read error shouldn't fail the health check */
+    }
     res.status(ok ? 200 : 503).json({
       status: ok ? 'ok' : 'degraded',
       redis,
       ocrProvider: config.ocrProvider,
       enrichment: config.enrich.enabled ? 'enabled' : 'disabled',
+      receiptProfiles: receiptProfileCount,
       time: new Date().toISOString(),
     });
   });
 
   app.use(receipts);
+  app.use(receiptProfiles);
 
   // Error handler (multer + unexpected).
   app.use((err, req, res, next) => {

@@ -47,6 +47,21 @@ const config = {
   receiptsDir: path.join(dataDir, 'receipts'),
   maxUploadBytes: int(process.env.MAX_UPLOAD_MB, 15) * 1024 * 1024,
 
+  // Receipt Profiles: user-defined transformation rules applied to a parsed
+  // receipt (see docs/RECEIPT-PROFILES.md). Definitions and results are durable
+  // JSON, mirroring the receipt store. Limits guard the user-supplied rules
+  // (regex compile + length caps) since the API is unauthenticated.
+  receiptProfiles: {
+    profilesDir: path.join(dataDir, 'receiptProfiles'),
+    resultsDir: path.join(dataDir, 'profileResults'),
+    // Transformers are code modules shipped WITH the app (not user-uploaded), so
+    // they live under src, not DATA_DIR. A profile references one by id.
+    transformersDir: path.join(__dirname, 'receiptProfiles', 'transformers'),
+    // Optional server-wide default profile (id or name) applied at upload time
+    // when the request omits a profileId. Empty = no default.
+    defaultProfileId: process.env.DEFAULT_PROFILE_ID || '',
+  },
+
   // Local directory for Tesseract language data (eng.traineddata[.gz]). Used as
   // both the cache and the offline lang-path so first run needs no CDN download
   // — handy on networks that block/inspect the jsdelivr CDN. Override with

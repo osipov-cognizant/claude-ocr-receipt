@@ -4,7 +4,8 @@ const express = require('express');
 const multer = require('multer');
 const config = require('../config');
 const store = require('../store');
-const { enqueueReceipt } = require('../queue');
+const { enqueueReceipt, enqueueProcessAndApply } = require('../queue');
+const profileStore = require('../receiptProfiles/profileStore');
 const view = require('../web/view');
 const logger = require('../logger');
 
@@ -45,16 +46,44 @@ router.post(
         (req.files?.image && req.files.image[0]);
       if (!f) return res.status(400).json({ error: 'No image uploaded. Use field "receipt".' });
 
+      // Optional: apply a profile after OCR. An explicit form field wins;
+      // otherwise fall back to a server-wide default (DEFAULT_PROFILE_ID).
+      const requestedProfileId =
+        (req.body && req.body.profileId) || config.receiptProfiles.defaultProfileId || null;
+      let profile = null;
+      if (requestedProfileId) {
+        profile = await profileStore.get(requestedProfileId);
+        if (!profile) {
+          return res.status(400).json({ error: `unknown profile "${requestedProfileId}"` });
+        }
+      }
+
       const record = await store.createReceipt({
         buffer: f.buffer,
         mimeType: f.mimetype,
         originalName: f.originalname,
         source: (req.body && req.body.source) || 'api',
       });
-      await enqueueReceipt(record.id);
-      logger.info({ id: record.id, source: record.source }, 'receipt accepted and queued');
 
-      res.status(202).json({ id: record.id, status: record.status, ...links(record.id) });
+      // With a profile, run a flow: OCR pipeline first (child), then applyProfile
+      // (parent). Without one, the single-job path is unchanged.
+      if (profile) {
+        await enqueueProcessAndApply(record.id, profile.id);
+        logger.info({ id: record.id, source: record.source, profileId: profile.id }, 'receipt accepted; OCR+profile flow queued');
+      } else {
+        await enqueueReceipt(record.id);
+        logger.info({ id: record.id, source: record.source }, 'receipt accepted and queued');
+      }
+
+      res.status(202).json({
+        id: record.id,
+        status: record.status,
+        profileId: profile ? profile.id : null,
+        profileResultUrl: profile
+          ? `${config.publicBaseUrl}/api/receipts/${record.id}/profileResults/${profile.id}`
+          : null,
+        ...links(record.id),
+      });
     } catch (err) {
       next(err);
     }

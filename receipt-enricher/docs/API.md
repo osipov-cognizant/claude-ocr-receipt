@@ -46,12 +46,23 @@ queued  ──►  processing  ──►  done
 | Method | Path | Purpose | Returns |
 |--------|------|---------|---------|
 | `GET`  | `/health` | Liveness + Redis/config status | JSON |
-| `POST` | `/api/receipts` | Upload a receipt image (enqueues processing) | `202` JSON |
+| `POST` | `/api/receipts` | Upload a receipt image (enqueues processing; optional `profileId` applies a profile after OCR) | `202` JSON |
 | `GET`  | `/api/receipts` | List recent receipts (`?limit=`, max 500) | JSON array |
 | `GET`  | `/api/receipts/:id` | Full record for one receipt | JSON |
 | `GET`  | `/receipts/:id/view` | Human-readable HTML view | HTML |
 | `GET`  | `/receipts/:id/image` | The original uploaded photo | image bytes |
 | `GET`  | `/` | HTML list of all receipts | HTML |
+| `GET`  | `/api/transformers` | List available transformers | JSON array |
+| `GET`  | `/api/receiptProfiles` | List receipt profiles | JSON array |
+| `POST` | `/api/receiptProfiles` | Create a profile | `201` JSON |
+| `GET`  | `/api/receiptProfiles/:id` | One profile (id or name) | JSON |
+| `PUT`  | `/api/receiptProfiles/:id` | Replace a profile | JSON |
+| `DELETE` | `/api/receiptProfiles/:id` | Delete a profile | `204` |
+| `POST` | `/api/receipts/:id/applyProfile/:profileId` | Apply a profile to a receipt (`?dryRun=1`, `?async=1`) | JSON / `202` |
+| `GET`  | `/api/receipts/:id/profileResults` | List profile results for a receipt | JSON array |
+| `GET`  | `/api/receipts/:id/profileResults/:profileId` | One profile result | JSON |
+
+The profile endpoints are documented in **[Receipt Profiles](#receipt-profiles)** below.
 
 ### `GET /health`
 
@@ -64,6 +75,7 @@ curl -fsS "$BASE/health" | jq .
   "redis": "up",
   "ocrProvider": "vision",
   "enrichment": "disabled",
+  "receiptProfiles": 1,
   "time": "2026-06-03T20:00:00.000Z"
 }
 ```
@@ -76,22 +88,34 @@ Multipart upload. The file field may be named **`receipt`** (preferred),
 `telegram`, …). Max size: `MAX_UPLOAD_MB` (default 15 MB). Only `image/*` types
 are accepted.
 
+Optional text field **`profileId`** (a profile id or name) applies a
+[Receipt Profile](#receipt-profiles) right after OCR — the worker runs the
+pipeline first, then the profile, wired with a BullMQ flow (`process-receipt`
+child → `applyProfile` parent). An unknown profile returns `400`. A server-wide
+default can be set with `DEFAULT_PROFILE_ID`; it applies when `profileId` is
+omitted.
+
 ```bash
 curl -fsS \
   -F "receipt=@/path/to/receipt.jpg" \
   -F "source=curl" \
+  -F "profileId=usGrocery1" \
   "$BASE/api/receipts"
 ```
 ```json
 {
   "id": "1b70d95bbd9f462f",
   "status": "queued",
+  "profileId": "rp_9f3c1a2b4d5e6f70",
+  "profileResultUrl": "http://localhost:8080/api/receipts/1b70d95bbd9f462f/profileResults/rp_9f3c1a2b4d5e6f70",
   "statusUrl": "http://localhost:8080/api/receipts/1b70d95bbd9f462f",
   "viewUrl": "http://localhost:8080/receipts/1b70d95bbd9f462f/view"
 }
 ```
-Responds `202 Accepted` immediately; processing happens asynchronously.
-Errors: `400` (no/invalid image), `413` (too large).
+Responds `202 Accepted` immediately; processing happens asynchronously. Without
+a `profileId`, `profileId`/`profileResultUrl` are `null`. Poll `statusUrl` until
+`status` is `done`, then read `profileResultUrl` for the canonicalized result.
+Errors: `400` (no/invalid image, or unknown profile), `413` (too large).
 
 ### `GET /api/receipts/:id`
 
@@ -191,6 +215,140 @@ The bundled bash CLI wraps these calls (no Node required — just `curl`, plus
 ```
 
 Point it at another host with `API_URL=http://my-host:8080 ./cli/receipts …`.
+
+---
+
+## Receipt Profiles
+
+A **receipt profile** canonicalizes a parsed receipt — normalizing store names,
+date formats, and item descriptions — by running a **transformer** (a small
+TypeScript/JavaScript module shipped with the app). You apply a profile to an
+already-processed receipt; the original record is never modified, and the result
+(plus an auto-derived change log) is stored separately. Design details:
+[`docs/RECEIPT-PROFILES.md`](RECEIPT-PROFILES.md).
+
+- A **profile** is metadata: `{ name, description, transformer, config }`. It
+  binds a name to a transformer id and an optional `config` object.
+- A **transformer** is code under `src/receiptProfiles/transformers/`, referenced
+  by id (filename without extension). Transformers are **not** uploaded via the
+  API — there is no remote code execution.
+
+### Transformers
+
+```bash
+curl -fsS "$BASE/api/transformers" | jq .
+```
+```json
+[ { "id": "usGrocery", "name": "usGrocery", "version": 1,
+    "description": "Normalize common US grocery receipts …" },
+  { "id": "tesseractGroceryUs", "name": "tesseractGroceryUs", "version": 1,
+    "description": "Clean up noisy Tesseract OCR output for US grocery receipts …" } ]
+```
+
+`tesseractGroceryUs` is a derivative of `usGrocery` tuned for the offline
+**Tesseract** pipeline: it strips OCR junk + the embedded SKU code, Title-Cases
+item names, expands common abbreviations, and infers the store from Kirkland
+items. Use it when receipts are processed with `OCR_PROVIDER=tesseract`.
+
+### Profile CRUD
+
+```bash
+# Create — body is the profile metadata (transformer must be a known id)
+curl -fsS -X POST "$BASE/api/receiptProfiles" -H 'content-type: application/json' -d '{
+  "name": "usGrocery1",
+  "description": "Normalize US grocery receipts",
+  "transformer": "usGrocery",
+  "config": {}
+}'
+```
+```json
+{
+  "id": "rp_9f3c1a2b4d5e6f70",
+  "name": "usGrocery1",
+  "description": "Normalize US grocery receipts",
+  "version": 1,
+  "transformer": "usGrocery",
+  "config": {},
+  "createdAt": "2026-06-04T18:20:00.000Z",
+  "updatedAt": "2026-06-04T18:20:00.000Z"
+}
+```
+
+Other operations (`:id` accepts the profile **id or name**):
+
+```bash
+curl -fsS "$BASE/api/receiptProfiles"                 # list (summaries)
+curl -fsS "$BASE/api/receiptProfiles/usGrocery1"      # one (id or name)
+curl -fsS -X PUT "$BASE/api/receiptProfiles/usGrocery1" \
+  -H 'content-type: application/json' -d @profile.json # replace (bumps version)
+curl -fsS -X DELETE "$BASE/api/receiptProfiles/usGrocery1"   # -> 204
+```
+
+A shipped example profile (`usGrocery1` → the `usGrocery` transformer) is seeded
+on first boot. Validation errors return `400` with a `details` array:
+
+```json
+{ "error": "profile validation failed",
+  "details": ["unknown transformer \"foo\"; available: usGrocery"] }
+```
+
+### Apply a profile
+
+```bash
+# Apply to an already-processed receipt; persists the result.
+curl -fsS -X POST "$BASE/api/receipts/$ID/applyProfile/usGrocery1" | jq .
+```
+```json
+{
+  "receiptId": "1b70d95bbd9f462f",
+  "profileId": "rp_9f3c1a2b4d5e6f70",
+  "profileName": "usGrocery1",
+  "profileVersion": 1,
+  "transformer": "usGrocery",
+  "appliedAt": "2026-06-04T18:20:05.000Z",
+  "dryRun": false,
+  "store":  { "name": "Costco", "date": "05-26-2026" },
+  "items":  [ { "description": "Water 5 Liter", "price": 4.99, … }, … ],
+  "totals": { "itemCount": 14, "sumOfItems": 125.11, "subtotalMatch": null, … },
+  "changes": [
+    { "field": "store.name", "from": "Costco Wholesale", "to": "Costco" },
+    { "field": "item.description", "itemIndex": 0, "from": "KS Water Gal", "to": "Water 5 Liter" }
+  ]
+}
+```
+
+Add `?dryRun=1` to run the transform and return the result **without** persisting
+it (handy for trying a profile). Errors: `404` (unknown receipt or profile),
+`422` (the profile's transformer is no longer available).
+
+Add `?async=1` to apply the profile **in the background** via a BullMQ
+`applyProfile` job instead of inline. It validates the receipt/profile, returns
+`202` with `{ receiptId, profileId, status: "queued", profileResultUrl }`, and
+the result appears at `profileResultUrl` once the worker finishes:
+
+```bash
+curl -fsS -X POST "$BASE/api/receipts/$ID/applyProfile/usGrocery1?async=1" | jq .
+```
+```json
+{
+  "receiptId": "1b70d95bbd9f462f",
+  "profileId": "rp_9f3c1a2b4d5e6f70",
+  "status": "queued",
+  "profileResultUrl": "http://localhost:8080/api/receipts/1b70d95bbd9f462f/profileResults/rp_9f3c1a2b4d5e6f70"
+}
+```
+
+### Read results
+
+```bash
+curl -fsS "$BASE/api/receipts/$ID/profileResults"               # all results
+curl -fsS "$BASE/api/receipts/$ID/profileResults/usGrocery1"    # one (id or name)
+```
+
+> Profiles and results are durable JSON under `DATA_DIR/receiptProfiles/` and
+> `DATA_DIR/profileResults/<receiptId>/`. Applying a profile is **synchronous by
+> default** (the transform is pure and fast); pass `?async=1` to run it on the
+> worker, or set a `profileId` at upload time to chain it after OCR via a flow.
 
 ---
 

@@ -45,6 +45,9 @@ services:
       # NOTE: kept flat (no nested ${...}) — podman-compose mishandles nested
       # default expansions and leaks a literal '}'.
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+      # Optional: apply this profile (id or name) to every upload that doesn't
+      # specify one. Empty by default (no profile applied unless requested).
+      DEFAULT_PROFILE_ID: ${DEFAULT_PROFILE_ID:-}
     labels:
       # Test indicator: "prod" for normal runs, "test" when the suite sets it.
       io.receipt-enricher.suite: "${RECEIPT_SUITE:-prod}"
@@ -78,6 +81,7 @@ services:
       REDIS_URL: redis://redis:6379
       DATA_DIR: /app/data
       OCR_PROVIDER: ${OCR_PROVIDER:-auto}
+      DEFAULT_PROFILE_ID: ${DEFAULT_PROFILE_ID:-}
     labels:
       io.receipt-enricher.suite: "${RECEIPT_SUITE:-prod}"
     volumes:

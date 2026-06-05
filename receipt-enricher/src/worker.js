@@ -6,47 +6,77 @@ const logger = require('./logger');
 const { createConnection } = require('./redis');
 const store = require('./store');
 const { processReceipt } = require('./pipeline');
+const applyService = require('./receiptProfiles/applyService');
 
-const connection = createConnection();
-
-const worker = new Worker(
-  config.queueName,
-  async (job) => {
-    const { receiptId } = job.data;
-    logger.info({ jobId: job.id, receiptId, attempt: job.attemptsMade + 1 }, 'processing receipt');
-    return processReceipt(receiptId);
-  },
-  { connection, concurrency: config.queueConcurrency }
-);
-
-worker.on('completed', (job) => {
-  logger.info({ jobId: job.id, receiptId: job.data.receiptId }, 'job completed');
-});
-
-worker.on('failed', async (job, err) => {
-  logger.error(
-    { jobId: job?.id, receiptId: job?.data?.receiptId, attempt: job?.attemptsMade, err: err.message },
-    'job failed'
-  );
-  // On the final attempt, mark the durable record as failed.
-  if (job && job.attemptsMade >= (job.opts.attempts || config.jobAttempts)) {
-    try {
-      await store.update(job.data.receiptId, { status: 'failed', error: err.message });
-    } catch (e) {
-      logger.error({ err: e.message }, 'could not mark receipt failed');
-    }
+/**
+ * Pure job dispatcher — routes on job.name so it can be unit-tested without
+ * Redis. `process-receipt` keeps its original name for backward compatibility;
+ * `applyProfile` (camelCase, the project convention) is the Step-2 addition.
+ *   - process-receipt: run the OCR pipeline (extract -> parse -> enrich -> summarize).
+ *   - applyProfile:     apply a profile to an (already processed) receipt.
+ * In an upload-time flow both run: process-receipt (child) then applyProfile
+ * (parent), so the profile is applied to the freshly-processed receipt.
+ */
+async function dispatch(job) {
+  const { receiptId, profileId } = job.data;
+  switch (job.name) {
+    case 'process-receipt':
+      logger.info({ jobId: job.id, receiptId, attempt: job.attemptsMade + 1 }, 'processing receipt');
+      return processReceipt(receiptId);
+    case 'applyProfile':
+      logger.info({ jobId: job.id, receiptId, profileId, attempt: job.attemptsMade + 1 }, 'applying profile');
+      return applyService.applyProfileToReceipt(receiptId, profileId);
+    default:
+      throw new Error(`unknown job name: ${job.name}`);
   }
-});
-
-logger.info(
-  { queue: config.queueName, concurrency: config.queueConcurrency, ocr: config.ocrProvider },
-  'worker started'
-);
-
-function shutdown(sig) {
-  logger.info({ sig }, 'shutting down worker');
-  worker.close().then(() => process.exit(0));
-  setTimeout(() => process.exit(0), 8000).unref();
 }
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+
+/** Start the BullMQ worker. Side-effecting (opens Redis); called only when this
+ *  module is run directly (`node src/worker.js`), so requiring it for unit tests
+ *  never touches Redis. */
+function start() {
+  const connection = createConnection();
+  const worker = new Worker(config.queueName, dispatch, {
+    connection,
+    concurrency: config.queueConcurrency,
+  });
+
+  worker.on('completed', (job) => {
+    logger.info({ jobId: job.id, name: job.name, receiptId: job.data.receiptId }, 'job completed');
+  });
+
+  worker.on('failed', async (job, err) => {
+    logger.error(
+      { jobId: job?.id, name: job?.name, receiptId: job?.data?.receiptId, attempt: job?.attemptsMade, err: err.message },
+      'job failed'
+    );
+    // On the final attempt of a processing job, mark the durable record failed.
+    // (An applyProfile failure leaves the receipt record untouched.)
+    if (job && job.name === 'process-receipt' && job.attemptsMade >= (job.opts.attempts || config.jobAttempts)) {
+      try {
+        await store.update(job.data.receiptId, { status: 'failed', error: err.message });
+      } catch (e) {
+        logger.error({ err: e.message }, 'could not mark receipt failed');
+      }
+    }
+  });
+
+  logger.info(
+    { queue: config.queueName, concurrency: config.queueConcurrency, ocr: config.ocrProvider },
+    'worker started'
+  );
+
+  function shutdown(sig) {
+    logger.info({ sig }, 'shutting down worker');
+    worker.close().then(() => process.exit(0));
+    setTimeout(() => process.exit(0), 8000).unref();
+  }
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+
+  return worker;
+}
+
+if (require.main === module) start();
+
+module.exports = { dispatch, start };
