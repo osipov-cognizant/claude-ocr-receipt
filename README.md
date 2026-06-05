@@ -84,11 +84,12 @@ install.
 cp .env.example .env
 #   then edit .env to add keys you have (TAVILY_API_KEY, ANTHROPIC_API_KEY, ...)
 
-# 2. Build and start (pick your runtime)
-docker compose up --build -d
-#   — or, with Podman (use the hyphenated wrapper) —
-podman-compose -p receipt-enricher up --build -d
-#   (the explicit -p pins the project name; see "Podman notes" for why)
+# 2. Build and start (pick your runtime). --no-cache forces a clean image
+#    rebuild every run, so reused commands never serve stale layers.
+docker compose build --no-cache && docker compose up -d
+#   — or, with Podman (use the hyphenated wrapper; -p pins the project name,
+#     see "Podman notes" for why) —
+podman-compose -p receipt-enricher up --build --no-cache -d
 
 # 3. Make the CLI handy
 chmod +x cli/receipts
