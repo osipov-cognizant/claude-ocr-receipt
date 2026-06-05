@@ -141,8 +141,10 @@ a crumpled phone photo is hit-or-miss, while a vision model reads the layout and
 returns clean items. The default vision model is `claude-sonnet-4-6`; override
 with `ANTHROPIC_MODEL`, or set `VISION_PROVIDER=openai` with `OPENAI_API_KEY`.
 
-> Tesseract note: it downloads its English data on first run (then caches it),
-> and it can't read HEIC — convert iPhone photos to JPEG/PNG if you use it.
+> Tesseract note: the English language data ships in the image
+> (`tessdata/eng.traineddata`), so it runs fully offline — no CDN download. It
+> can't read HEIC (convert iPhone photos to JPEG/PNG) and needs an upright,
+> reasonably sharp image — a sideways photo reads as noise.
 
 ---
 
