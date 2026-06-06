@@ -423,3 +423,10 @@ built-in list if the file is missing. **Add/adjust an extractor:** `src/ocr/`.
 - The acceptance suite must stay isolated: never point its teardown at the prod
   project, never bind the prod host port. Defaults (`test-receipt-enricher`,
   18080) already ensure this; the teardown guard refuses the prod name.
+- **Keep `docs/API.md` in sync with the routes.** It's the canonical HTTP API
+  reference. Whenever you add, remove, or change an endpoint in
+  `src/routes/*.js` (path, method, query params, request/response shape, or
+  status codes), update `docs/API.md` in the same change — both the **Endpoints**
+  table and the relevant section/curl example. The web routes live alongside the
+  REST routes (e.g. `src/routes/receiptProfiles.js` carries both `/api/...` and
+  the HTML `/...view`/list views), so a "just a view" change still counts.

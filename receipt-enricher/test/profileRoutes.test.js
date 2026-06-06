@@ -125,6 +125,57 @@ test('POST applyProfile (by name) -> 200, runs transformer and persists', async 
   assert.equal(one.store.name, 'Costco');
 });
 
+test('GET /api/profileResults lists results across all receipts (newest first)', async () => {
+  const a = await seedDoneReceipt();
+  const b = await seedDoneReceipt();
+  assert.equal((await post(`/api/receipts/${a}/applyProfile/routesTest1`)).status, 200);
+  assert.equal((await post(`/api/receipts/${b}/applyProfile/routesTest1`)).status, 200);
+
+  const all = await (await fetch(`${base}/api/profileResults`)).json();
+  assert.ok(Array.isArray(all));
+  const ids = all.map((r) => r.receiptId);
+  assert.ok(ids.includes(a) && ids.includes(b), 'spans both receipts');
+});
+
+test('GET /profileResults renders an HTML list linking to each result view', async () => {
+  const id = await seedDoneReceipt();
+  assert.equal((await post(`/api/receipts/${id}/applyProfile/routesTest1`)).status, 200);
+
+  const res = await fetch(`${base}/profileResults`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type') || '', /html/);
+  const html = await res.text();
+  assert.ok(html.includes(`/receipts/${id}/profileResults/`), 'links to the per-result view');
+  assert.ok(html.includes('routesTest1'), 'shows the profile name');
+});
+
+test('GET /api/profileResults/:profileId filters by profile (resolves a name)', async () => {
+  const a = await seedDoneReceipt();
+  const b = await seedDoneReceipt();
+  assert.equal((await post(`/api/receipts/${a}/applyProfile/routesTest1`)).status, 200);
+  assert.equal((await post(`/api/receipts/${b}/applyProfile/routesTest1`)).status, 200);
+
+  const byName = await (await fetch(`${base}/api/profileResults/routesTest1`)).json();
+  assert.ok(byName.length >= 2);
+  assert.ok(byName.every((r) => r.profileName === 'routesTest1'), 'only this profile');
+  assert.ok(byName.map((r) => r.receiptId).includes(a), 'spans receipts');
+
+  const unknown = await (await fetch(`${base}/api/profileResults/noSuchProfile`)).json();
+  assert.deepEqual(unknown, [], 'unknown profile -> empty list');
+});
+
+test('GET /profileResults/:profileId renders the filtered HTML list', async () => {
+  const id = await seedDoneReceipt();
+  assert.equal((await post(`/api/receipts/${id}/applyProfile/routesTest1`)).status, 200);
+
+  const res = await fetch(`${base}/profileResults/routesTest1`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type') || '', /html/);
+  const html = await res.text();
+  assert.ok(html.includes('Profile results for'), 'shows the filter heading');
+  assert.ok(html.includes(`/receipts/${id}/profileResults/`), 'links to the per-result view');
+});
+
 test('POST applyProfile?dryRun=1 -> 200 but does NOT persist', async () => {
   const id = await seedDoneReceipt();
   const res = await post(`/api/receipts/${id}/applyProfile/routesTest1?dryRun=1`);

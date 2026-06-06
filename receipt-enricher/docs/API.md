@@ -62,6 +62,10 @@ queued  ──►  processing  ──►  done
 | `GET`  | `/api/receipts/:id/profileResults` | List profile results for a receipt | JSON array |
 | `GET`  | `/api/receipts/:id/profileResults/:profileId` | One profile result | JSON |
 | `GET`  | `/receipts/:id/profileResults/:profileId/view` | HTML view of the receipt with the profile applied | HTML |
+| `GET`  | `/api/profileResults` | List **all** profile results across every receipt | JSON array |
+| `GET`  | `/api/profileResults/:profileId` | All results for one profile (id or name), across every receipt | JSON array |
+| `GET`  | `/profileResults` | HTML list of all profile results | HTML |
+| `GET`  | `/profileResults/:profileId` | HTML list of results for one profile (id or name) | HTML |
 
 The profile endpoints are documented in **[Receipt Profiles](#receipt-profiles)** below.
 
@@ -360,6 +364,26 @@ open "$BASE/receipts/$ID/profileResults/usGrocery1/view"        # HTML, discount
 The `…/view` endpoint renders the profile-applied receipt as HTML — discounts
 fold into their line item (with the pre-discount price struck through). It shows
 the stored result when present, otherwise computes it on the fly (no persistence).
+
+### Browse results across receipts
+
+The endpoints above are scoped to one receipt. To see results **across all
+receipts** — e.g. every receipt cleaned by a given transformer profile — use the
+cross-receipt endpoints (results are sorted newest-first by `appliedAt`):
+
+```bash
+curl -fsS "$BASE/api/profileResults"                  # every result, all receipts
+curl -fsS "$BASE/api/profileResults/usGrocery1"       # only this profile (id or name)
+open "$BASE/profileResults"                            # HTML list of all results
+open "$BASE/profileResults/usGrocery1"                 # HTML list filtered to one profile
+```
+
+The `:profileId` accepts a profile **id or name** (a name is resolved to its id,
+which is how results are keyed). An **unknown profile returns an empty array**
+(`200`), not `404`, so results from a since-deleted profile stay reachable by
+their raw `rp_…` id. The HTML list at `/profileResults` links each row to its
+per-result `…/view`; the profile badge on each row links to that profile's
+filtered list.
 
 > Profiles and results are durable JSON under `DATA_DIR/receiptProfiles/` and
 > `DATA_DIR/profileResults/<receiptId>/`. Applying a profile is **synchronous by

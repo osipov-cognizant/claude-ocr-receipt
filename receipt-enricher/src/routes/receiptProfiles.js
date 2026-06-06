@@ -123,6 +123,27 @@ router.post('/api/receipts/:id/applyProfile/:profileId', async (req, res, next) 
   }
 });
 
+// Every profile result across all receipts (newest first).
+router.get('/api/profileResults', async (req, res, next) => {
+  try {
+    res.json(await resultStore.listAll());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Every result for ONE profile, across all receipts. Accepts a profile id or
+// name (results are keyed by id, so resolve a name first).
+router.get('/api/profileResults/:profileId', async (req, res, next) => {
+  try {
+    const profile = await profileStore.get(req.params.profileId);
+    const profileId = profile ? profile.id : req.params.profileId;
+    res.json(await resultStore.listByProfile(profileId));
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/api/receipts/:id/profileResults', async (req, res, next) => {
   try {
     const record = await store.get(req.params.id);
@@ -147,6 +168,31 @@ router.get('/api/receipts/:id/profileResults/:profileId', async (req, res, next)
 });
 
 // --- Web view of a profile-applied receipt ---------------------------------
+
+// HTML list of every profile result across all receipts. Mirrors the receipts
+// list at `/`; each row links to the per-result view below.
+router.get('/profileResults', async (req, res, next) => {
+  try {
+    res.type('html').send(view.renderProfileResultList(await resultStore.listAll()));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// HTML list filtered to ONE profile (id or name), across all receipts.
+router.get('/profileResults/:profileId', async (req, res, next) => {
+  try {
+    const profile = await profileStore.get(req.params.profileId);
+    const profileId = profile ? profile.id : req.params.profileId;
+    const results = await resultStore.listByProfile(profileId);
+    res.type('html').send(
+      view.renderProfileResultList(results, { filter: profile ? profile.name : req.params.profileId })
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
 
 // HTML view of a receipt as transformed by a profile (discounts folded into
 // their line items). Renders the stored result when present; otherwise computes

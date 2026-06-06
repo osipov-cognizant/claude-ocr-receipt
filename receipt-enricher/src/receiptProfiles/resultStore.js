@@ -42,10 +42,12 @@ async function get(receiptId, profileId) {
   }
 }
 
-async function list(receiptId) {
+// Read every result file in one receipt's subdir. Tolerant: missing dir → [],
+// unreadable file → skipped.
+async function readDir(dir) {
   let files;
   try {
-    files = await fsp.readdir(receiptDir(receiptId));
+    files = await fsp.readdir(dir);
   } catch {
     return [];
   }
@@ -53,13 +55,43 @@ async function list(receiptId) {
   for (const f of files) {
     if (!f.endsWith('.json')) continue;
     try {
-      out.push(JSON.parse(await fsp.readFile(path.join(receiptDir(receiptId), f), 'utf8')));
+      out.push(JSON.parse(await fsp.readFile(path.join(dir, f), 'utf8')));
     } catch {
       /* skip unreadable */
     }
+  }
+  return out;
+}
+
+async function list(receiptId) {
+  const out = await readDir(receiptDir(receiptId));
+  out.sort((a, b) => (a.appliedAt < b.appliedAt ? 1 : -1));
+  return out;
+}
+
+// Every result across every receipt, newest first. Walks each receipt subdir
+// (one per receipt) under baseDir and flattens.
+async function listAll() {
+  let dirents;
+  try {
+    dirents = await fsp.readdir(baseDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const d of dirents) {
+    if (!d.isDirectory()) continue;
+    out.push(...(await readDir(path.join(baseDir, d.name))));
   }
   out.sort((a, b) => (a.appliedAt < b.appliedAt ? 1 : -1));
   return out;
 }
 
-module.exports = { save, get, list };
+// Every result for one profile (across all receipts), newest first. Results are
+// keyed by profile id, so callers pass an id (resolve a name upstream).
+async function listByProfile(profileId) {
+  const all = await listAll();
+  return all.filter((r) => r.profileId === profileId);
+}
+
+module.exports = { save, get, list, listAll, listByProfile };

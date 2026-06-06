@@ -209,9 +209,45 @@ function renderList(records) {
         .join('')
     : `<p class="empty-note">No receipts yet. Upload one with the CLI or the Telegram bot.</p>`;
   return HEAD + `
+  <p><a href="/profileResults">profile results →</a></p>
   <hr class="rule">
   <div class="list">${rows}</div>
   ` + FOOT;
 }
 
-module.exports = { renderReceipt, renderProfileResult, renderList, esc };
+// List of profile results across all receipts. Each row links to the existing
+// per-result view (…/profileResults/<profileId>/view), keyed by receiptId +
+// profileId since one receipt may have several applied profiles. Pass `opts.filter`
+// (a profile name/id) to render the "results for one profile" heading + empty state.
+function renderProfileResultList(results, opts = {}) {
+  const filter = opts.filter || null;
+  const rows = results.length
+    ? results
+        .map((r) => {
+          const t = r.totals || {};
+          const itemCount = (t.itemCount != null ? t.itemCount : (r.items ? r.items.length : 0)) || 0;
+          const when = r.appliedAt ? new Date(r.appliedAt).toLocaleString() : '';
+          return `<div class="li">
+            <span><a href="/receipts/${esc(r.receiptId)}/profileResults/${esc(r.profileId)}/view">${esc(r.store?.name || 'Unknown store')}</a>
+              <a class="pill" href="/profileResults/${esc(r.profileId)}">${esc(r.profileName || r.profileId)}</a>
+              <span class="pill">${esc(r.transformer || '')}</span></span>
+            <span>${esc(itemCount)} items · ${esc(when)}</span>
+          </div>`;
+        })
+        .join('')
+    : filter
+      ? `<p class="empty-note">No results for profile "${esc(filter)}". Apply it to a receipt to see it here.</p>`
+      : `<p class="empty-note">No profile results yet. Apply a profile to a receipt to see it here.</p>`;
+  const heading = filter
+    ? `<p class="summary">Profile results for <span class="pill">${esc(filter)}</span></p>`
+    : '';
+  const nav = filter
+    ? `<p><a href="/profileResults">← all profile results</a></p>`
+    : `<p><a href="/">← all receipts</a></p>`;
+  return HEAD + nav + heading + `
+  <hr class="rule">
+  <div class="list">${rows}</div>
+  ` + FOOT;
+}
+
+module.exports = { renderReceipt, renderProfileResult, renderList, renderProfileResultList, esc };
