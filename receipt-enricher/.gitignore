@@ -19,6 +19,9 @@ npm-debug.log*
 # Temp/scratch files
 tmp_*.js
 
+# Local OCR analysis materials (sample harness scripts + generated comparisons)
+analysis/
+
 # Tesseract language data (large; fetch per machine — see tessdata/README.md)
 tessdata/*.traineddata
 tessdata/*.traineddata.gz

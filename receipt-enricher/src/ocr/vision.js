@@ -5,14 +5,14 @@ const config = require('../config');
 const logger = require('../logger');
 const { imagePathFor } = require('../store');
 
-const EXTRACTION_PROMPT = `You are a precise receipt parser. You are given a photo of a grocery store receipt.
-Extract the contents and respond with ONLY a JSON object (no markdown, no commentary) of this exact shape:
+const EXTRACTION_PROMPT = `You are a precise receipt transcriber. You are given a photo of a grocery store receipt.
+Transcribe the contents and respond with ONLY a JSON object (no markdown, no commentary) of this exact shape:
 
 {
   "store": { "name": string | null, "date": string | null },
   "items": [
     {
-      "description": string,      // the printed line-item name, cleaned up
+      "description": string,      // the line-item name EXACTLY as printed (see transcription rules)
       "sku": string | null,        // item/SKU number if printed, else null
       "qty": number | null,
       "unitPrice": number | null,
@@ -22,10 +22,22 @@ Extract the contents and respond with ONLY a JSON object (no markdown, no commen
   "totals": { "subtotal": number | null, "tax": number | null, "total": number | null }
 }
 
-Rules:
-- Only include real purchased products. Exclude subtotals, tax lines, totals, payment/tender lines, savings, and store info from "items".
+Transcription rules (this output is used as OCR ground truth, so fidelity matters more than readability):
+- Transcribe each item "description" VERBATIM — character for character as printed on the receipt.
+- Do NOT clean up, expand, normalize, correct, or translate the text. Keep the receipt's original
+  abbreviations ("KS SPARK WAT", not "Kirkland Signature Sparkling Water"; "5DZ EGGS", not "5 Dozen Eggs"),
+  its capitalization, its spacing, and its punctuation as printed.
+- Do NOT add words that are not printed (e.g. do not append "Cheese", "Water", or a brand the receipt omits).
+- Only fix a character if the printed glyph is genuinely ambiguous in the image; never "improve" a name
+  that is already legible.
+
+Other rules:
+- Only include real purchased products. Exclude subtotals, tax lines, totals, payment/tender lines, store info,
+  and standalone savings/discount lines from "items" UNLESS the discount is printed as its own line tied to an
+  item — in that case transcribe it verbatim as a separate item with a negative price.
 - Prices are plain numbers (e.g. 12.99), never strings, never with currency symbols.
 - If a value is not present, use null. Never invent SKUs or prices.
+- "store.name" is the printed store/header name as-is.
 - "date" should be ISO-ish (YYYY-MM-DD) when you can determine it, otherwise the raw printed date or null.`;
 
 function bufferToBase64(buf) {
