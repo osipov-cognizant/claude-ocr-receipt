@@ -8,7 +8,10 @@ description: >-
   enrichment, bash CLI, Telegram bot, server-rendered web views, node:test
   suite). Use this skill whenever working IN THIS repo: editing or debugging the
   API, worker, or pipeline; the receipt parser and store detection (KNOWN_STORES
-  in src/parse); the OCR providers in src/ocr; Tavily enrichment; the CLI or web
+  in src/parse); the OCR providers in src/ocr; receipt profiles & transformers
+  (src/receiptProfiles — applying/seeding usGrocery1 or tesseractGroceryUs1,
+  `--profile`/profileId uploads, an "unknown profile" 400, or pinning the OCR
+  engine via OCR_PROVIDER); Tavily enrichment; the CLI or web
   views; running the hermetic, live, or bash/curl acceptance tests (e.g.
   `npm run test:live:vision` skipping, Tesseract producing garbage, or
   `test/acceptance/run-all.sh`); standing up or tearing down the containerized
@@ -16,8 +19,9 @@ description: >-
   its extracted metadata at localhost:8080; uploading via the REST API with curl;
   or hitting the project's known gotchas (corporate TLS breaking jsdelivr/Tavily
   but not Anthropic, an empty ANTHROPIC_API_KEY shadowing .env, Tesseract needing
-  an upright image + local tessdata, `podman compose` vs `podman-compose`, or the
-  vision MODULE_NOT_FOUND import bug).
+  local tessdata (orientation is auto-corrected via Tesseract OSD),
+  `podman compose` vs `podman-compose`, a new seedProfiles file not taking until
+  `down -v`, or the vision MODULE_NOT_FOUND import bug).
   Consult it before guessing how this codebase is wired or why an
   extract/parse/enrich/test step behaves as it does. It covers developing and
   running THIS app — not generic OCR/PDF extraction, generic BullMQ/Redis/Docker/
@@ -52,6 +56,7 @@ receipt-enricher/
 │  ├─ ocr/  index.js vision.js tesseract.js   # extraction providers
 │  ├─ parse/receiptParser.js     # normalizeStructured() + parseText() heuristics
 │  ├─ enrich/ index.js tavily.js # Tavily lookup + Redis cache
+│  ├─ receiptProfiles/     # profile engine, registry, stores + transformers/ (see "Receipt profiles")
 │  ├─ web/view.js          # server-rendered HTML (renderReceipt / renderList)
 │  └─ healthcheck.js  healthcheck-worker.js   # container healthchecks (see Podman)
 ├─ cli/receipts            # bash + curl CLI (no Node needed)
@@ -66,13 +71,27 @@ receipt-enricher/
 ├─ docker-compose.yml      # PARAMETERIZED (project/port/OCR/label/base-url) — see Podman
 ├─ Dockerfile  Containerfile  .env.example
 └─ README.md
-samples/costco/
-├─ PXL_20260526_235419811.jpg          # the original sample — shot ROTATED 90°
-└─ rotated_PXL_20260526_235419811.jpg  # upright copy (use this for Tesseract)
+samples/                  # test corpus, organized by store chain (subfolders)
+├─ costco/*.jpg           # Costco receipts (PXL_*, 4967*); some shot rotated 90°
+└─ samsclub/*.jpg         # Sam's Club receipts (sams-club-*)
 ```
 
-For the HTTP API in detail, read **`receipt-enricher/docs/API.md`**. For the
-test design, read **`receipt-enricher/test/README.md`**.
+OCR now **auto-corrects orientation** before recognizing (Tesseract OSD — see
+the gotchas), so the old `rotated_*` upright copies were removed: feed any sample
+to Tesseract regardless of how it was shot.
+
+### Reference docs (read these instead of guessing or duplicating)
+
+- **`receipt-enricher/README.md`** — the **canonical user-facing guide**: quick
+  start, the modes table, the full env-var **Configuration reference**, Podman
+  notes, REST/Telegram usage, and Troubleshooting. It's the source of truth for
+  "how does an operator run/configure this?" — read it (don't restate it) when a
+  question is about setup, config defaults, or the supported run modes.
+- **`receipt-enricher/docs/API.md`** — full HTTP API reference + curl walkthrough.
+- **`receipt-enricher/test/README.md`** — test design / coverage map.
+- **[`references/stack-bringup.md`](references/stack-bringup.md)** — idioms for
+  standing up a fresh, isolated stack for a purpose (qa/feat prefixes), built on
+  the parameterized compose file; points back to the README for the rest.
 
 ## Getting started (local dev)
 
@@ -135,6 +154,16 @@ podman-compose -p receipt-enricher down            # stop, KEEP volumes
 podman-compose -p receipt-enricher down -v         # stop + WIPE data volumes (fresh slate)
 ```
 
+**Pin the OCR engine at `up` time** by prefixing the env var (it's a host-side
+compose param, *not* a CLI/per-upload flag): `OCR_PROVIDER=tesseract
+podman-compose -p receipt-enricher up --build -d`. Add `--no-cache` for a
+guaranteed clean image (the README quick-start does). `/health` is your
+confirmation — it returns `{status, redis, ocrProvider, enrichment,
+receiptProfiles, time}` (`src/app.js`), so `jq '{status, ocrProvider,
+receiptProfiles}'` tells you in one shot whether the engine pin took
+(`ocrProvider: "tesseract"` vs a plain `up`'s `"auto"`) and how many profiles
+seeded. `status` is `ok` only when Redis is up.
+
 The compose file is **parameterized** with prod-safe defaults, so the same file
 serves prod and the test suite: `RECEIPT_PROJECT` (project name),
 `RECEIPT_API_PORT` (host port), `OCR_PROVIDER`, `RECEIPT_SUITE` (container
@@ -143,6 +172,26 @@ port 8080, `auto` OCR). **`PUBLIC_BASE_URL` defaults to `http://localhost:8080`
 and is what the API advertises in `statusUrl`/`viewUrl`** — set it whenever the
 published host port differs (e.g. the test stack on 18080) or links point at the
 wrong port.
+
+**Fresh stack for a specific purpose (qa / feat / repro).** Because the compose
+file is parameterized, you can run a second, fully isolated stack by varying
+host-side env vars — pick a purpose **prefix** and a free port, and keep `-p`,
+`RECEIPT_PROJECT`, and `PUBLIC_BASE_URL` consistent (volumes are namespaced by
+project name, so isolation from prod is automatic):
+
+```bash
+PREFIX=feat; PORT=38080; PROJ=${PREFIX}-receipt-enricher   # qa→28080, feat→38080, …
+RECEIPT_PROJECT=$PROJ RECEIPT_API_PORT=$PORT RECEIPT_SUITE=$PREFIX \
+PUBLIC_BASE_URL=http://localhost:$PORT OCR_PROVIDER=tesseract \
+  podman-compose -p "$PROJ" up --build --no-cache -d
+API_URL=http://localhost:$PORT ./cli/receipts health        # CLI needs API_URL set
+podman-compose -p "$PROJ" down -v                            # teardown (same -p!)
+```
+
+The acceptance suite is just the canonical instance of this pattern
+(`test-receipt-enricher` on `18080`). **For the full parameter matrix, port
+convention, and the prefix-specific gotchas, read
+[`references/stack-bringup.md`](references/stack-bringup.md).**
 
 **Healthchecks are real** (`src/healthcheck.js` GETs `/health`;
 `src/healthcheck-worker.js` PINGs Redis). They're *script files*, not inline
@@ -210,6 +259,50 @@ fallback: it needs an upright, sharp image and produces noisy descriptions and
 the occasional digit slip. The bigger/“best” Tesseract model is not meaningfully
 better here — image quality is the bottleneck, not the model.
 
+## Receipt profiles & transformers (post-OCR cleanup)
+
+A *profile* is metadata that binds a name to a **transformer** — a code module
+under `src/receiptProfiles/transformers/` (loaded by `registry.js`, listed at
+`GET /api/transformers`). Applying a profile runs the transformer over a parsed
+receipt and stores the result **separately** with a change log; the original
+record is never mutated. This is orthogonal to OCR: the *engine* (Tesseract vs
+vision) is chosen at stack-up time via `OCR_PROVIDER`; the *profile* is a
+separate post-OCR step. Two transformers ship, each tuned to its OCR source:
+
+| Transformer        | Tuned for         | What it does                                            |
+|--------------------|-------------------|---------------------------------------------------------|
+| `usGrocery`        | clean vision output | normalize store/date, fold per-item discounts, rewrite Costco water |
+| `tesseractGroceryUs` | noisy Tesseract output | strip junk prefixes + embedded SKUs, Title-Case ALL-CAPS, recover store name, rewrite water |
+
+**Seeding (and its sharp edge).** On boot `server.js` calls
+`profileStore.seedIfEmpty()`, which loads **every** `*.json` in
+`src/receiptProfiles/seedProfiles/`. Two seed files ship, so a fresh store gets
+two profiles: **`usGrocery1`** (→ `usGrocery`, the vision pairing) and
+**`tesseractGroceryUs1`** (→ `tesseractGroceryUs`, the Tesseract pairing). The
+gotcha is in the name: it seeds **only when the profile store is empty**. Adding
+or changing a seed file therefore does *nothing* to an existing store — you must
+wipe the data volume (`podman-compose -p receipt-enricher down -v`) and bring it
+back up for new seeds to take. Confirm with `curl -fsS localhost:8080/health |
+jq .receiptProfiles` (expect 2) or `GET /api/receiptProfiles`. Profile names
+must be camelCase letters/digits, no dashes/spaces (`validate.js` `NAME_RE`).
+
+**Applying a profile.** Three paths: at upload (`receipts upload <img> --profile
+<id|name>`, or raw `-F profileId=<id|name>` → runs a BullMQ flow: OCR child →
+applyProfile parent); after the fact (`POST /api/receipts/<id>/applyProfile/
+<name>`, `?async=1` to queue it); or server-wide via `DEFAULT_PROFILE_ID`
+(`config.defaultProfileId`) so every upload that omits one gets it.
+`profileStore.get()` resolves a profile by `rp_…` id **or** by name. The cleaned
+result is at `GET /api/receipts/<id>/profileResults/<name>` and viewable at
+`…/profileResults/<name>/view`.
+
+**Debugging a profile upload that 400s.** `receipts upload --profile foo` failing
+with a bare `curl: (22) … 400` almost always means the profile doesn't exist —
+the route returns `400 {"error":"unknown profile \"foo\""}`, but the CLI's
+`curl -fsS` swallows the body so you only see the code. See the real error with:
+`curl -sS -o /tmp/b -w 'HTTP %{http_code}\n' -F receipt=@<img> -F
+profileId=<name> localhost:8080/api/receipts; cat /tmp/b`. The fix is usually to
+register/seed the profile (see seeding above), not to change the upload.
+
 ## Environment gotchas (hard-won — check these first when something "doesn't work")
 
 This repo is developed on a corporate-managed network, which causes several
@@ -236,10 +329,14 @@ non-obvious failures. Before debugging code, rule these out:
    helper searches both and loads with override. `config.js` uses plain
    `dotenv.config()` (cwd-relative, no override).
 
-4. **Tesseract needs an upright image + local language data.**
-   - The bundled sample is rotated 90°; Tesseract reads sideways text as noise.
-     Use `samples/costco/rotated_*.jpg`, or pass `SAMPLE_IMAGE=<path>` to the
-     live tests.
+4. **Tesseract needs local language data (orientation is now auto-handled).**
+   - **Orientation:** the pipeline auto-corrects rotation before recognizing —
+     `src/ocr/tesseract.js` runs Tesseract OSD (`tessdata/osd.traineddata`, the
+     legacy oem-0 core) to detect the 90° quadrant, then recognizes with it
+     corrected; with nothing to correct it falls back to `rotateAuto` for skew.
+     OSD is best-effort (skips below `config.tesseractOsdMinConfidence`, or if
+     `osd.traineddata` is missing). So you no longer need an upright copy — feed
+     any orientation; the old `rotated_*` samples were deleted accordingly.
    - Language data lives in `tessdata/eng.traineddata` (offline; see
      `tessdata/README.md`). The code points Tesseract there via
      `config.tessdataDir` (override `TESSDATA_PATH`), so no CDN download is
@@ -281,9 +378,21 @@ cd receipt-enricher && unset ANTHROPIC_API_KEY   # drop the empty shadow var
 npm run test:live:vision                          # auto-loads .env with override
 ```
 
-**Run Tesseract offline on the upright sample:**
+**Run Tesseract offline on a sample (any orientation — auto-corrected):**
 ```bash
-SAMPLE_IMAGE=samples/costco/rotated_PXL_20260526_235419811.jpg npm run test:live:tesseract
+SAMPLE_IMAGE=samples/costco/PXL_20260526_235419811.jpg npm run test:live:tesseract
+```
+
+**Run the whole sample corpus through the containerized Tesseract + cleanup
+profile** (the CLI selects a *profile*, not the engine; the engine is pinned at
+`up` time — see Receipt profiles for why both pieces are needed):
+```bash
+export PATH="/opt/podman/bin:$PATH"; cd receipt-enricher
+OCR_PROVIDER=tesseract podman-compose -p receipt-enricher up --build -d
+curl -fsS localhost:8080/health | jq '{status, ocrProvider, receiptProfiles}'  # expect tesseract, ≥2
+for img in ../samples/*/*.jpg; do
+  ./cli/receipts upload "$img" --wait --profile tesseractGroceryUs1
+done
 ```
 
 **Process a receipt locally and view it (no Docker/Redis):** load `.env` with

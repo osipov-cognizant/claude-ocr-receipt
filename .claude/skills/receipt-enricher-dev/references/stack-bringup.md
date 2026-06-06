@@ -1,0 +1,117 @@
+# Stack bring-up reference
+
+Two things live here: (1) a pointer to the project's canonical README, and (2)
+the idioms for standing up a **fresh, isolated stack for a specific purpose**
+(qa, feat, a bugfix repro, …) using the parameterized compose file. Read this
+when you need more than the default `podman-compose -p receipt-enricher up`.
+
+## Canonical README (read it for user-facing setup)
+
+The authoritative user-facing guide is the live project README — **don't
+duplicate it, read it**:
+
+- **`receipt-enricher/README.md`** — quick start, the modes table (which keys
+  enable vision vs Tesseract vs Tavily), the full **Configuration reference**
+  (every env var + default), Podman/security notes, REST + Telegram usage, and
+  Troubleshooting. When a question is "how does an operator run/configure this?",
+  the README is the source of truth; this skill is the developer-side companion.
+- **`receipt-enricher/docs/API.md`** — full HTTP API + curl walkthrough.
+
+The README's Quick start uses `--build --no-cache` deliberately, so a reused
+command never serves a stale image layer. Carry that habit into the idioms below.
+
+## Why purpose-prefixed stacks work
+
+The compose file (`receipt-enricher/docker-compose.yml`) is **parameterized**
+with prod-safe defaults, so the *same* file runs prod, the acceptance suite, and
+any ad-hoc stack — fully isolated — just by varying host-side env vars:
+
+| Env var              | Compose use                                  | Default               |
+|----------------------|----------------------------------------------|-----------------------|
+| `RECEIPT_PROJECT`    | compose `name:` → image/volume/network prefix | `receipt-enricher`    |
+| `RECEIPT_API_PORT`   | published host port (`:8080` in-container)   | `8080`                |
+| `OCR_PROVIDER`       | engine (`auto`\|`vision`\|`tesseract`)       | `auto`                |
+| `PUBLIC_BASE_URL`    | links the API advertises (`statusUrl`/`viewUrl`) | `http://localhost:8080` |
+| `RECEIPT_SUITE`      | label `io.receipt-enricher.suite`            | `prod`                |
+| `DEFAULT_PROFILE_ID` | profile applied to every upload that omits one | `` (none)           |
+
+Isolation is automatic: volumes are named `<project>_redis-data` /
+`<project>_receipt-data`, so a distinct project name gives a distinct data store
+and queue — no cross-talk with prod. The acceptance suite is just the canonical
+example of this (`test-receipt-enricher`, port `18080`, label `test`).
+
+## The idiom: a fresh stack for a purpose
+
+Pick a **prefix** that names the purpose (`qa`, `feat`, `bug1234`, …) and a free
+host port. Keep `-p`, `RECEIPT_PROJECT`, and `PUBLIC_BASE_URL` mutually
+consistent — that's the whole trick.
+
+```bash
+export PATH="/opt/podman/bin:$PATH"
+cd /Users/952657/Projects/claude-ocr-receipt/receipt-enricher
+
+PREFIX=feat            # purpose tag — MUST start with a letter/digit (podman tag rule)
+PORT=38080             # any free host port ≠ prod 8080 / acceptance 18080
+PROJ=${PREFIX}-receipt-enricher
+
+RECEIPT_PROJECT=$PROJ \
+RECEIPT_API_PORT=$PORT \
+RECEIPT_SUITE=$PREFIX \
+PUBLIC_BASE_URL=http://localhost:$PORT \
+OCR_PROVIDER=tesseract \
+  podman-compose -p "$PROJ" up --build --no-cache -d
+
+# Health + sanity (note: point the CLI at THIS stack's port, not the default 8080)
+curl -fsS localhost:$PORT/health | jq '{status, ocrProvider, receiptProfiles}'
+API_URL=http://localhost:$PORT ./cli/receipts health
+```
+
+Drive it through the CLI by overriding `API_URL` each call (the CLI defaults to
+`http://localhost:8080`):
+
+```bash
+API_URL=http://localhost:$PORT ./cli/receipts upload ../samples/costco/PXL_20260526_235419811.jpg \
+  --wait --profile tesseractGroceryUs1
+```
+
+Tear it down — **always target the same `-p`**, and `-v` to reclaim its volumes:
+
+```bash
+podman-compose -p "$PROJ" down -v
+```
+
+A suggested (not enforced) port convention to avoid collisions:
+
+| Purpose             | project name            | host port |
+|---------------------|-------------------------|-----------|
+| prod / default      | `receipt-enricher`      | `8080`    |
+| acceptance suite    | `test-receipt-enricher` | `18080`   |
+| qa                  | `qa-receipt-enricher`   | `28080`   |
+| feature work        | `feat-receipt-enricher` | `38080`   |
+
+Find/clean every purpose stack by its label:
+
+```bash
+podman ps -a --filter label=io.receipt-enricher.suite=feat
+```
+
+## Gotchas (these bite specifically on prefixed stacks)
+
+- **`-p` must equal `RECEIPT_PROJECT`.** `-p` wins for the project name, but
+  `RECEIPT_PROJECT` still feeds the compose `name:`; a mismatch produces two
+  different names and confusing orphans. Set both to `$PROJ`.
+- **`PUBLIC_BASE_URL` must match the published port** or the API hands back
+  `viewUrl`/`statusUrl` links pointing at the wrong port (e.g. `:8080` when you
+  published `:38080`). It's kept flat (no nested `${...}`) on purpose —
+  podman-compose leaks a literal `}` on nested default expansion.
+- **The CLI ignores all of this** — it only knows `API_URL` (default
+  `localhost:8080`). To hit a prefixed stack, prefix every `receipts …` call with
+  `API_URL=http://localhost:$PORT`.
+- **Prefix must start with a letter/digit.** podman tags images
+  `<project>_<service>`; a name starting with `-`/`_` fails the build with
+  `invalid reference format`.
+- **Never point a teardown at the prod name.** `down -v` on `receipt-enricher`
+  wipes prod data; keep purpose stacks on their own `$PROJ`.
+- **Profiles re-seed per stack.** Each fresh stack has its own empty profile
+  store, so `seedIfEmpty` re-seeds `usGrocery1` + `tesseractGroceryUs1` on first
+  boot — expected, and why `receiptProfiles` should read `2` on a fresh `/health`.
