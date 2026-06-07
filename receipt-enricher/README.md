@@ -58,6 +58,17 @@ upload time to run it automatically **after** OCR via a BullMQ flow
 Tesseract output). See [`docs/RECEIPT-PROFILES.md`](docs/RECEIPT-PROFILES.md) and
 the API reference in [`docs/API.md`](docs/API.md).
 
+**Products (final stage):** once a profile result exists, the **product
+resolver** maps each cleaned line item to real product information — a title, a
+description, and the top web link that substantiates it. The backend is a
+configurable **resolver/adapter** picked by `PRODUCT_RESOLVER` (like
+`OCR_PROVIDER` picks the OCR engine); the shipped `anthropic` resolver calls a
+low-end model (`claude-haiku-4-5`) and grounds the link with Anthropic's
+server-side web search. It runs by default after a profile is applied — so a
+single upload goes OCR → profile → products via a 3-level BullMQ flow
+(`process-receipt` → `applyProfile` → `resolveProducts`) — and is also runnable
+on demand. See [Products in `docs/API.md`](docs/API.md#products).
+
 ---
 
 ## Components
@@ -262,6 +273,12 @@ All via `.env` (see `.env.example`). Highlights:
 | `QUEUE_CONCURRENCY`  | `2`                      | parallel receipts in the worker              |
 | `JOB_ATTEMPTS`       | `3`                      | retries with exponential backoff             |
 | `DEFAULT_PROFILE_ID` | —                        | receipt profile (id or name) applied to uploads that omit one |
+| `PRODUCTS_ENABLED`   | `true`                   | master switch for the product-resolution stage |
+| `PRODUCT_RESOLVER`   | `anthropic`              | backend resolver/adapter (the only one shipped; `tavily` is a future drop-in) |
+| `PRODUCT_ANTHROPIC_MODEL` | `claude-haiku-4-5`  | model the anthropic resolver calls (set `claude-sonnet-4-6` if Haiku can't use web tools) |
+| `PRODUCT_ANTHROPIC_WEB_SEARCH` | `true`         | ground `productUrl` via Anthropic's server-side web search |
+| `PRODUCT_MAX_ITEMS`  | `100`                    | cap line items resolved per receipt (one backend call each) |
+| `PRODUCT_RESOLVE_ON_UPLOAD` | `true`            | resolve products on upload whenever a profile is applied (opt out per-upload with `resolveProducts=0`) |
 | `TELEGRAM_BOT_TOKEN` | —                        | enables the bot service                      |
 
 Inside compose, `REDIS_URL` and `DATA_DIR` are set for you. The compose file also

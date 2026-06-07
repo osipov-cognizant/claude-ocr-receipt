@@ -59,8 +59,10 @@ trap teardown EXIT
 # --- bring up the isolated test stack --------------------------------------
 stack_up
 
-# --- run every step, in order, cli/ then rest/ -----------------------------
-for d in cli rest; do
+# --- run every step, in order: stack/ (image/infra) then cli/ then rest/ ----
+# stack/ runs first so a broken image (e.g. missing OCR blobs) fails fast with a
+# clear message instead of surfacing as a cryptic OCR error during cli/rest.
+for d in stack cli rest; do
   for s in "$DIR/$d"/*.sh; do
     [ -f "$s" ] || continue
     run_step "$s"

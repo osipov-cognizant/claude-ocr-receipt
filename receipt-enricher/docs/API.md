@@ -46,7 +46,7 @@ queued  ──►  processing  ──►  done
 | Method | Path | Purpose | Returns |
 |--------|------|---------|---------|
 | `GET`  | `/health` | Liveness + Redis/config status | JSON |
-| `POST` | `/api/receipts` | Upload a receipt image (enqueues processing; optional `profileId` applies a profile after OCR) | `202` JSON |
+| `POST` | `/api/receipts` | Upload a receipt image (enqueues processing; optional `profileId` applies a profile after OCR, then resolves products by default — `resolveProducts=0` opts out) | `202` JSON |
 | `GET`  | `/api/receipts` | List recent receipts (`?limit=`, max 500) | JSON array |
 | `GET`  | `/api/receipts/:id` | Full record for one receipt | JSON |
 | `GET`  | `/receipts/:id/view` | Human-readable HTML view | HTML |
@@ -66,8 +66,16 @@ queued  ──►  processing  ──►  done
 | `GET`  | `/api/profileResults/:profileId` | All results for one profile (id or name), across every receipt | JSON array |
 | `GET`  | `/profileResults` | HTML list of all profile results | HTML |
 | `GET`  | `/profileResults/:profileId` | HTML list of results for one profile (id or name) | HTML |
+| `GET`  | `/api/productResolvers` | List available product resolvers + the active one | JSON |
+| `POST` | `/api/receipts/:id/profileResults/:profileId/resolveProducts` | Resolve products from a profile result (`?dryRun=1`, `?async=1`) | JSON / `202` |
+| `GET`  | `/api/receipts/:id/products` | List product results for a receipt | JSON array |
+| `GET`  | `/api/receipts/:id/products/:profileId` | Products for one source profile (id or name) | JSON |
+| `GET`  | `/receipts/:id/products/:profileId/view` | HTML view of resolved products | HTML |
+| `GET`  | `/api/products` | List **all** product results across every receipt | JSON array |
+| `GET`  | `/products` | HTML list of all product results | HTML |
 
-The profile endpoints are documented in **[Receipt Profiles](#receipt-profiles)** below.
+The profile endpoints are documented in **[Receipt Profiles](#receipt-profiles)** below;
+the product endpoints in **[Products](#products)**.
 
 ### `GET /health`
 
@@ -81,6 +89,7 @@ curl -fsS "$BASE/health" | jq .
   "ocrProvider": "vision",
   "enrichment": "disabled",
   "receiptProfiles": 1,
+  "products": { "enabled": true, "resolver": "anthropic" },
   "time": "2026-06-03T20:00:00.000Z"
 }
 ```
@@ -100,6 +109,12 @@ child → `applyProfile` parent). An unknown profile returns `400`. A server-wid
 default can be set with `DEFAULT_PROFILE_ID`; it applies when `profileId` is
 omitted.
 
+When a profile is applied, **[Products](#products)** are resolved by default as a
+third pipeline stage (OCR → profile → products), wired as a 3-level BullMQ flow
+(`process-receipt` → `applyProfile` → `resolveProducts`). Opt out per-upload with
+text field **`resolveProducts=0`**. Products require a profile, so an upload with
+no `profileId` (and no `DEFAULT_PROFILE_ID`) is OCR-only and resolves nothing.
+
 ```bash
 curl -fsS \
   -F "receipt=@/path/to/receipt.jpg" \
@@ -113,13 +128,16 @@ curl -fsS \
   "status": "queued",
   "profileId": "rp_9f3c1a2b4d5e6f70",
   "profileResultUrl": "http://localhost:8080/api/receipts/1b70d95bbd9f462f/profileResults/rp_9f3c1a2b4d5e6f70",
+  "productsUrl": "http://localhost:8080/api/receipts/1b70d95bbd9f462f/products/rp_9f3c1a2b4d5e6f70",
   "statusUrl": "http://localhost:8080/api/receipts/1b70d95bbd9f462f",
   "viewUrl": "http://localhost:8080/receipts/1b70d95bbd9f462f/view"
 }
 ```
 Responds `202 Accepted` immediately; processing happens asynchronously. Without
-a `profileId`, `profileId`/`profileResultUrl` are `null`. Poll `statusUrl` until
-`status` is `done`, then read `profileResultUrl` for the canonicalized result.
+a `profileId`, `profileId`/`profileResultUrl`/`productsUrl` are `null`; with one
+but `resolveProducts=0`, `productsUrl` is `null`. Poll `statusUrl` until `status`
+is `done`, then read `profileResultUrl` for the canonicalized result and
+`productsUrl` for the resolved products.
 Errors: `400` (no/invalid image, or unknown profile), `413` (too large).
 
 ### `GET /api/receipts/:id`
@@ -389,6 +407,81 @@ filtered list.
 > `DATA_DIR/profileResults/<receiptId>/`. Applying a profile is **synchronous by
 > default** (the transform is pure and fast); pass `?async=1` to run it on the
 > worker, or set a `profileId` at upload time to chain it after OCR via a flow.
+
+---
+
+## Products
+
+The final pipeline stage maps each cleaned line item from a **profile result**
+to product information (a product title, description, and the top web link that
+substantiates it). The backend is a configurable **resolver** (an adapter)
+chosen by `PRODUCT_RESOLVER` — like `OCR_PROVIDER` picks the OCR engine, not a
+per-receipt record. The shipped resolver, `anthropic`, calls a low-end Anthropic
+model (`claude-haiku-4-5` by default) and — when `PRODUCT_ANTHROPIC_WEB_SEARCH`
+is on (default) — grounds the link with Anthropic's server-side web search.
+
+Resolution always runs **after a receipt profile has been applied** (it reads
+the profile result's items) and is keyed by the source `receiptProfileId`.
+
+### Available resolvers
+
+```bash
+curl -fsS "$BASE/api/productResolvers" | jq .
+# { "active": "anthropic", "resolvers": [ { "id": "anthropic", "name": "..." } ] }
+```
+
+### Resolve products
+
+```bash
+# Sync (default). ?dryRun=1 resolves without persisting; ?async=1 queues it (202).
+curl -fsS -X POST "$BASE/api/receipts/$ID/profileResults/usGrocery1/resolveProducts" | jq .
+```
+```json
+{
+  "receiptId": "1b70d95bbd9f462f",
+  "receiptProfileId": "rp_9f3c1a2b4d5e6f70",
+  "receiptProfileName": "usGrocery1",
+  "resolver": "anthropic",
+  "model": "claude-haiku-4-5",
+  "resolvedAt": "2026-06-06T20:00:00.000Z",
+  "store": { "name": "Costco", "date": "2026-05-26" },
+  "products": [
+    {
+      "lineItem": { "description": "KS SPARK WAT", "sku": "1234567", "qty": 1, "unitPrice": 4.99, "price": 4.99 },
+      "productTitle": "Kirkland Signature Sparkling Water",
+      "productDescription": "Costco house-brand sparkling water, ...",
+      "productUrl": "https://www.costco.com/...",
+      "brand": "Kirkland Signature",
+      "category": "Beverages",
+      "confidence": 0.82,
+      "error": null
+    }
+  ],
+  "stats": { "resolved": 1, "skipped": 0, "errors": 0 }
+}
+```
+
+Errors: `404` (unknown receipt/profile), `409` (the profile has not been applied
+to this receipt yet — apply it first). When products are disabled or the resolver
+isn't configured (no API key), resolution degrades gracefully: items list with
+null product fields and `stats.skipped`.
+
+### Read products
+
+```bash
+curl -fsS "$BASE/api/receipts/$ID/products"               # all product results for a receipt
+curl -fsS "$BASE/api/receipts/$ID/products/usGrocery1"    # one (source profile id or name)
+open  "$BASE/receipts/$ID/products/usGrocery1/view"        # HTML
+curl -fsS "$BASE/api/products"                             # every product result, all receipts
+open  "$BASE/products"                                      # HTML list of all product results
+```
+
+> Product results are durable JSON under `DATA_DIR/products/<receiptId>/`. Unlike
+> the profile view, the HTML product view renders only a **stored** result (it
+> won't resolve fresh on a miss, since resolution makes live backend calls).
+> Configure with `PRODUCT_RESOLVER`, `PRODUCT_ANTHROPIC_MODEL`,
+> `PRODUCT_ANTHROPIC_WEB_SEARCH`, `PRODUCT_MAX_ITEMS`, `PRODUCT_RESOLVE_ON_UPLOAD`,
+> `PRODUCTS_ENABLED` (see the README Configuration reference).
 
 ---
 

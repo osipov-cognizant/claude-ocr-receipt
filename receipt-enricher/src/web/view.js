@@ -196,6 +196,86 @@ function renderProfileResult(record, result) {
   ` + FOOT;
 }
 
+// One resolved product row. The product title leads (falling back to the raw
+// line-item text); the source receipt line + price sit underneath, and the
+// substantiating link (productUrl) is appended to the description.
+function productRow(p) {
+  const li = p.lineItem || {};
+  const title = p.productTitle || li.description || '(unidentified)';
+  const sub = [];
+  if (p.brand) sub.push(esc(p.brand));
+  if (p.category) sub.push(esc(p.category));
+  if (typeof p.confidence === 'number') sub.push(`confidence ${(p.confidence * 100).toFixed(0)}%`);
+  const fromLine = li.description
+    ? `<div class="sub">from “${esc(li.description)}”${li.sku ? ` · SKU ${esc(li.sku)}` : ''}</div>`
+    : '';
+  const desc = p.productDescription
+    ? `<div class="snip">${esc(p.productDescription)}${p.productUrl ? ` <a href="${esc(p.productUrl)}" target="_blank" rel="noopener">↗</a>` : ''}</div>`
+    : p.productUrl
+      ? `<div class="snip"><a href="${esc(p.productUrl)}" target="_blank" rel="noopener">${esc(p.productUrl)}</a></div>`
+      : '';
+  const err = p.error ? `<div class="disc">resolve error: ${esc(p.error)}</div>` : '';
+  return `<div class="item">
+    <div class="body">
+      <div class="name">${esc(title)}</div>
+      ${sub.length ? `<div class="sub">${sub.join(' · ')}</div>` : ''}
+      ${fromLine}
+      ${desc}
+      ${err}
+    </div>
+    <div class="price">${money(li.price)}</div>
+  </div>`;
+}
+
+// Render the products resolved from one receipt's profile result. Product data
+// comes from the product RESULT; identity/photo context from the receipt record.
+function renderProductResult(record, result) {
+  const products = result.products || [];
+  const s = result.stats || {};
+  const itemsHtml = products.length
+    ? products.map(productRow).join('')
+    : `<p class="empty-note">No products.</p>`;
+  return HEAD + `
+  <p><a href="/receipts/${esc(record.id)}/profileResults/${esc(result.receiptProfileId)}/view">← profile result</a> · <a href="/products">all products</a> · <a href="/">all receipts</a></p>
+  <div class="ticket">
+    <div class="banner">
+      <span class="lead">Products resolved:</span> via <span class="pill">${esc(result.resolver || '')}</span>
+      ${result.model ? `<span class="pill">${esc(result.model)}</span>` : ''}
+      · from profile ${esc(result.receiptProfileName || result.receiptProfileId)}
+      · ${esc(s.resolved || 0)} resolved, ${esc(s.skipped || 0)} skipped, ${esc(s.errors || 0)} error${s.errors === 1 ? '' : 's'}
+    </div>
+    <h2 class="store" style="margin-top:14px">${esc(result.store?.name || 'Unknown store')}</h2>
+    <div class="meta">${esc(result.store?.date || '')} · id ${esc(record.id)} · via ${esc(record.source)}</div>
+    <div class="items">${itemsHtml}</div>
+  </div>
+  <p style="margin-top:14px"><a href="/api/receipts/${esc(record.id)}/products/${esc(result.receiptProfileId)}">view result JSON</a> · <a href="/receipts/${esc(record.id)}/image" target="_blank" rel="noopener">view original photo</a></p>
+  ` + FOOT;
+}
+
+// List of product results across all receipts. Each row links to the per-result
+// view, keyed by receiptId + source receiptProfileId.
+function renderProductList(results) {
+  const rows = results.length
+    ? results
+        .map((r) => {
+          const count = (r.products ? r.products.length : 0) || 0;
+          const when = r.resolvedAt ? new Date(r.resolvedAt).toLocaleString() : '';
+          return `<div class="li">
+            <span><a href="/receipts/${esc(r.receiptId)}/products/${esc(r.receiptProfileId)}/view">${esc(r.store?.name || 'Unknown store')}</a>
+              <span class="pill">${esc(r.resolver || '')}</span>
+              <a class="pill" href="/receipts/${esc(r.receiptId)}/profileResults/${esc(r.receiptProfileId)}/view">${esc(r.receiptProfileName || r.receiptProfileId)}</a></span>
+            <span>${esc(count)} products · ${esc(when)}</span>
+          </div>`;
+        })
+        .join('')
+    : `<p class="empty-note">No products resolved yet. Resolve a receipt's profile result to see it here.</p>`;
+  return HEAD + `
+  <p><a href="/">← all receipts</a> · <a href="/profileResults">profile results</a></p>
+  <hr class="rule">
+  <div class="list">${rows}</div>
+  ` + FOOT;
+}
+
 function renderList(records) {
   const rows = records.length
     ? records
@@ -209,7 +289,7 @@ function renderList(records) {
         .join('')
     : `<p class="empty-note">No receipts yet. Upload one with the CLI or the Telegram bot.</p>`;
   return HEAD + `
-  <p><a href="/profileResults">profile results →</a></p>
+  <p><a href="/profileResults">profile results →</a> · <a href="/products">products →</a></p>
   <hr class="rule">
   <div class="list">${rows}</div>
   ` + FOOT;
@@ -250,4 +330,12 @@ function renderProfileResultList(results, opts = {}) {
   ` + FOOT;
 }
 
-module.exports = { renderReceipt, renderProfileResult, renderList, renderProfileResultList, esc };
+module.exports = {
+  renderReceipt,
+  renderProfileResult,
+  renderList,
+  renderProfileResultList,
+  renderProductResult,
+  renderProductList,
+  esc,
+};

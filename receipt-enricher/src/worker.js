@@ -7,15 +7,18 @@ const { createConnection } = require('./redis');
 const store = require('./store');
 const { processReceipt } = require('./pipeline');
 const applyService = require('./receiptProfiles/applyService');
+const resolveService = require('./products/resolveService');
 
 /**
  * Pure job dispatcher — routes on job.name so it can be unit-tested without
  * Redis. `process-receipt` keeps its original name for backward compatibility;
- * `applyProfile` (camelCase, the project convention) is the Step-2 addition.
+ * `applyProfile` and `resolveProducts` (camelCase, the project convention) are
+ * the later additions.
  *   - process-receipt: run the OCR pipeline (extract -> parse -> enrich -> summarize).
  *   - applyProfile:     apply a profile to an (already processed) receipt.
- * In an upload-time flow both run: process-receipt (child) then applyProfile
- * (parent), so the profile is applied to the freshly-processed receipt.
+ *   - resolveProducts:  map a profile result's line items to products.
+ * In an upload-time flow all three run bottom-up: process-receipt -> applyProfile
+ * -> resolveProducts, so products are resolved from the freshly-applied profile.
  */
 async function dispatch(job) {
   const { receiptId, profileId } = job.data;
@@ -26,6 +29,9 @@ async function dispatch(job) {
     case 'applyProfile':
       logger.info({ jobId: job.id, receiptId, profileId, attempt: job.attemptsMade + 1 }, 'applying profile');
       return applyService.applyProfileToReceipt(receiptId, profileId);
+    case 'resolveProducts':
+      logger.info({ jobId: job.id, receiptId, profileId, attempt: job.attemptsMade + 1 }, 'resolving products');
+      return resolveService.resolveProductsForProfileResult(receiptId, profileId);
     default:
       throw new Error(`unknown job name: ${job.name}`);
   }

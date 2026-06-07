@@ -73,11 +73,59 @@ async function enqueueApplyProfile(receiptId, profileId) {
   );
 }
 
+/**
+ * Enqueue a childless `resolveProducts` job to (re)resolve products for a
+ * receipt whose profile has already been applied — the async variant of the
+ * sync resolve route.
+ */
+async function enqueueResolveProducts(receiptId, profileId) {
+  return receiptsQueue.add(
+    'resolveProducts',
+    { receiptId, profileId },
+    { jobId: `resolveProducts-${receiptId}-${profileId}` }
+  );
+}
+
+/**
+ * Enqueue the full end-to-end flow for a single upload: OCR pipeline, then
+ * profile, then product resolution. The dependency chain runs bottom-up:
+ *   process-receipt (grandchild) -> applyProfile (child) -> resolveProducts (parent).
+ * Each parent waits in `waiting-children` until its child completes, and
+ * `failParentOnFailure` propagates a failure up the chain. Used when an upload
+ * both selects a profile and requests products.
+ */
+async function enqueueProcessApplyAndResolve(receiptId, profileId) {
+  return flowProducer.add({
+    name: 'resolveProducts',
+    queueName: config.queueName,
+    data: { receiptId, profileId },
+    opts: { ...defaultJobOptions, jobId: `resolveProducts-${receiptId}-${profileId}` },
+    children: [
+      {
+        name: 'applyProfile',
+        queueName: config.queueName,
+        data: { receiptId, profileId },
+        opts: { ...defaultJobOptions, jobId: `applyProfile-${receiptId}-${profileId}`, failParentOnFailure: true },
+        children: [
+          {
+            name: 'process-receipt',
+            queueName: config.queueName,
+            data: { receiptId },
+            opts: { ...defaultJobOptions, jobId: `receipt-${receiptId}`, failParentOnFailure: true },
+          },
+        ],
+      },
+    ],
+  });
+}
+
 module.exports = {
   receiptsQueue,
   flowProducer,
   enqueueReceipt,
   enqueueProcessAndApply,
   enqueueApplyProfile,
+  enqueueResolveProducts,
+  enqueueProcessApplyAndResolve,
   connection,
 };

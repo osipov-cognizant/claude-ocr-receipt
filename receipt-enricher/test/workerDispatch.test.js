@@ -15,7 +15,7 @@ useTempDataDir('worker-dispatch-test');
 installFakeRedis();
 
 // --- stub the delegates BEFORE requiring the worker ------------------------
-const calls = { process: [], apply: [] };
+const calls = { process: [], apply: [], resolve: [] };
 
 const pipelinePath = require.resolve('../src/pipeline');
 require.cache[pipelinePath] = {
@@ -43,6 +43,19 @@ require.cache[applyServicePath] = {
   },
 };
 
+const resolveServicePath = require.resolve('../src/products/resolveService');
+require.cache[resolveServicePath] = {
+  id: resolveServicePath,
+  filename: resolveServicePath,
+  loaded: true,
+  exports: {
+    resolveProductsForProfileResult: async (receiptId, profileId) => {
+      calls.resolve.push({ receiptId, profileId });
+      return { receiptId, profileId, resolved: true };
+    },
+  },
+};
+
 const { dispatch } = require('../src/worker');
 
 test("dispatch routes 'process-receipt' to processReceipt only", async () => {
@@ -66,6 +79,22 @@ test("dispatch routes 'applyProfile' to applyProfileToReceipt only", async () =>
   assert.deepEqual(calls.apply, [{ receiptId: 'r2', profileId: 'rp_abc' }]);
   assert.equal(calls.process.length, 0);
   assert.equal(out.applied, true);
+});
+
+test("dispatch routes 'resolveProducts' to resolveProductsForProfileResult only", async () => {
+  calls.process.length = 0;
+  calls.apply.length = 0;
+  calls.resolve.length = 0;
+  const out = await dispatch({
+    id: 'j4',
+    name: 'resolveProducts',
+    data: { receiptId: 'r4', profileId: 'rp_xyz' },
+    attemptsMade: 0,
+  });
+  assert.deepEqual(calls.resolve, [{ receiptId: 'r4', profileId: 'rp_xyz' }]);
+  assert.equal(calls.process.length, 0);
+  assert.equal(calls.apply.length, 0);
+  assert.equal(out.resolved, true);
 });
 
 test('dispatch throws on an unknown job name', async () => {

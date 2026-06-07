@@ -34,6 +34,13 @@ compose() {
   ( cd "$PROJECT_DIR" && "${_COMPOSE_CMD[@]}" -p "$RE_TEST_PROJECT" -f docker-compose.yml "$@" )
 }
 
+# Run a shell command inside a service container (api|worker|redis). -T disables
+# the pseudo-TTY so output is capturable in $(...). Used by the stack/ checks to
+# assert image contents (e.g. the Tesseract blobs are baked in).
+in_container() {
+  compose exec -T "$1" sh -c "$2"
+}
+
 # Build + start the test stack, then wait until /health is OK.
 stack_up() {
   info "engine=$RE_TEST_ENGINE  project=$RE_TEST_PROJECT  port=$RE_TEST_API_PORT  ocr=$RE_TEST_OCR"

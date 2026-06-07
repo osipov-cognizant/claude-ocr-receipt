@@ -4,12 +4,19 @@ const express = require('express');
 const multer = require('multer');
 const config = require('../config');
 const store = require('../store');
-const { enqueueReceipt, enqueueProcessAndApply } = require('../queue');
+const { enqueueReceipt, enqueueProcessAndApply, enqueueProcessApplyAndResolve } = require('../queue');
 const profileStore = require('../receiptProfiles/profileStore');
 const view = require('../web/view');
 const logger = require('../logger');
 
 const router = express.Router();
+
+// Interpret an optional form flag: absent → use the fallback; otherwise treat
+// anything but an explicit falsey value as true.
+function flag(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  return !['0', 'false', 'no', 'off'].includes(String(value).toLowerCase());
+}
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -65,9 +72,18 @@ router.post(
         source: (req.body && req.body.source) || 'api',
       });
 
-      // With a profile, run a flow: OCR pipeline first (child), then applyProfile
-      // (parent). Without one, the single-job path is unchanged.
-      if (profile) {
+      // Product resolution needs a profile result, so it only applies when a
+      // profile is selected. It's on by default (config.products.resolveOnUpload),
+      // opt out per-upload with resolveProducts=0.
+      const wantsProducts =
+        !!profile && config.products.enabled && flag(req.body && req.body.resolveProducts, config.products.resolveOnUpload);
+
+      // Choose the flow depth: OCR+profile+products (3-level), OCR+profile
+      // (2-level), or OCR only (single job). Without a profile the path is unchanged.
+      if (wantsProducts) {
+        await enqueueProcessApplyAndResolve(record.id, profile.id);
+        logger.info({ id: record.id, source: record.source, profileId: profile.id }, 'receipt accepted; OCR+profile+products flow queued');
+      } else if (profile) {
         await enqueueProcessAndApply(record.id, profile.id);
         logger.info({ id: record.id, source: record.source, profileId: profile.id }, 'receipt accepted; OCR+profile flow queued');
       } else {
@@ -81,6 +97,9 @@ router.post(
         profileId: profile ? profile.id : null,
         profileResultUrl: profile
           ? `${config.publicBaseUrl}/api/receipts/${record.id}/profileResults/${profile.id}`
+          : null,
+        productsUrl: wantsProducts
+          ? `${config.publicBaseUrl}/api/receipts/${record.id}/products/${profile.id}`
           : null,
         ...links(record.id),
       });

@@ -13,7 +13,7 @@ const { useTempDataDir, installFakeRedis } = require('./helpers/harness');
 const tmp = useTempDataDir('upload-profile-test');
 installFakeRedis();
 
-const enqueued = { receipt: [], flow: [], apply: [] };
+const enqueued = { receipt: [], flow: [], apply: [], resolveFlow: [], resolve: [] };
 const queuePath = require.resolve('../src/queue');
 require.cache[queuePath] = {
   id: queuePath,
@@ -28,14 +28,26 @@ require.cache[queuePath] = {
       enqueued.flow.push({ id, profileId });
       return { job: { id: `applyProfile-${id}-${profileId}` } };
     },
+    enqueueProcessApplyAndResolve: async (id, profileId) => {
+      enqueued.resolveFlow.push({ id, profileId });
+      return { job: { id: `resolveProducts-${id}-${profileId}` } };
+    },
     enqueueApplyProfile: async (id, profileId) => {
       enqueued.apply.push({ id, profileId });
       return { id: `applyProfile-${id}-${profileId}` };
+    },
+    enqueueResolveProducts: async (id, profileId) => {
+      enqueued.resolve.push({ id, profileId });
+      return { id: `resolveProducts-${id}-${profileId}` };
     },
     receiptsQueue: {},
     connection: {},
   },
 };
+
+function resetEnqueued() {
+  for (const k of Object.keys(enqueued)) enqueued[k].length = 0;
+}
 
 const config = require('../src/config');
 config.publicBaseUrl = 'http://localhost:8080';
@@ -69,22 +81,22 @@ after(() => {
   tmp.cleanup();
 });
 
-test('upload WITHOUT a profileId uses the single-job path', async () => {
-  enqueued.receipt.length = 0;
-  enqueued.flow.length = 0;
+test('upload WITHOUT a profileId uses the single-job path (no products)', async () => {
+  resetEnqueued();
   const res = await fetch(`${base}/api/receipts`, { method: 'POST', body: uploadForm(smallImage) });
   assert.equal(res.status, 202);
   const body = await res.json();
   assert.equal(body.status, 'queued');
   assert.equal(body.profileId, null);
   assert.equal(body.profileResultUrl, null);
+  assert.equal(body.productsUrl, null, 'no products without a profile');
   assert.deepEqual(enqueued.receipt, [body.id], 'enqueueReceipt called with the new id');
-  assert.equal(enqueued.flow.length, 0, 'no flow enqueued');
+  assert.equal(enqueued.flow.length, 0, 'no profile flow');
+  assert.equal(enqueued.resolveFlow.length, 0, 'no products flow');
 });
 
-test('upload WITH a profileId (by name) enqueues the flow and returns links', async () => {
-  enqueued.receipt.length = 0;
-  enqueued.flow.length = 0;
+test('upload WITH a profileId (by name) resolves products by default (3-level flow)', async () => {
+  resetEnqueued();
   const res = await fetch(`${base}/api/receipts`, {
     method: 'POST',
     body: uploadForm(smallImage, { profileId: 'uploadTest1' }),
@@ -96,20 +108,40 @@ test('upload WITH a profileId (by name) enqueues the flow and returns links', as
     body.profileResultUrl,
     `http://localhost:8080/api/receipts/${body.id}/profileResults/${profile.id}`
   );
+  assert.equal(
+    body.productsUrl,
+    `http://localhost:8080/api/receipts/${body.id}/products/${profile.id}`
+  );
   assert.equal(enqueued.receipt.length, 0, 'single-job path not taken');
-  assert.deepEqual(enqueued.flow, [{ id: body.id, profileId: profile.id }],
-    'enqueueProcessAndApply called with (receiptId, profileId)');
+  assert.equal(enqueued.flow.length, 0, '2-level flow not taken when products are on');
+  assert.deepEqual(enqueued.resolveFlow, [{ id: body.id, profileId: profile.id }],
+    'enqueueProcessApplyAndResolve called with (receiptId, profileId)');
 });
 
-test('upload WITH a profileId (by id) also works', async () => {
-  enqueued.flow.length = 0;
+test('upload WITH a profileId and resolveProducts=0 uses the 2-level flow (no products)', async () => {
+  resetEnqueued();
+  const res = await fetch(`${base}/api/receipts`, {
+    method: 'POST',
+    body: uploadForm(smallImage, { profileId: 'uploadTest1', resolveProducts: '0' }),
+  });
+  assert.equal(res.status, 202);
+  const body = await res.json();
+  assert.equal(body.profileId, profile.id);
+  assert.equal(body.productsUrl, null, 'products opted out');
+  assert.deepEqual(enqueued.flow, [{ id: body.id, profileId: profile.id }],
+    'enqueueProcessAndApply called');
+  assert.equal(enqueued.resolveFlow.length, 0, 'no products flow when opted out');
+});
+
+test('upload WITH a profileId (by id) also resolves products by default', async () => {
+  resetEnqueued();
   const res = await fetch(`${base}/api/receipts`, {
     method: 'POST',
     body: uploadForm(smallImage, { profileId: profile.id }),
   });
   assert.equal(res.status, 202);
   const body = await res.json();
-  assert.deepEqual(enqueued.flow, [{ id: body.id, profileId: profile.id }]);
+  assert.deepEqual(enqueued.resolveFlow, [{ id: body.id, profileId: profile.id }]);
 });
 
 test('upload with an UNKNOWN profileId -> 400 and nothing queued', async () => {
@@ -152,9 +184,8 @@ test('applyProfile?async=1 -> 404 for an unknown profile (nothing queued)', asyn
   assert.equal(enqueued.apply.length, 0);
 });
 
-test('DEFAULT_PROFILE_ID applies the flow when no profileId is given', async () => {
-  enqueued.receipt.length = 0;
-  enqueued.flow.length = 0;
+test('DEFAULT_PROFILE_ID applies the flow (with products) when no profileId is given', async () => {
+  resetEnqueued();
   const prev = config.receiptProfiles.defaultProfileId;
   config.receiptProfiles.defaultProfileId = 'uploadTest1';
   try {
@@ -162,7 +193,7 @@ test('DEFAULT_PROFILE_ID applies the flow when no profileId is given', async () 
     assert.equal(res.status, 202);
     const body = await res.json();
     assert.equal(body.profileId, profile.id);
-    assert.deepEqual(enqueued.flow, [{ id: body.id, profileId: profile.id }]);
+    assert.deepEqual(enqueued.resolveFlow, [{ id: body.id, profileId: profile.id }]);
     assert.equal(enqueued.receipt.length, 0);
   } finally {
     config.receiptProfiles.defaultProfileId = prev;

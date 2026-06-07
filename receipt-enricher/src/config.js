@@ -110,6 +110,41 @@ const config = {
     },
   },
 
+  // Product resolution: the final pipeline stage. Maps each cleaned line item
+  // from a receipt PROFILE RESULT to product information (title, description,
+  // substantiating web link) via a configurable backend *resolver* (an adapter).
+  // The resolver is chosen by config — like OCR_PROVIDER picks the OCR engine —
+  // NOT by a per-receipt record. The first resolver ('anthropic') calls a
+  // low-end Anthropic model; a Tavily resolver can be added later by dropping a
+  // module in resolvers/ and setting PRODUCT_RESOLVER=tavily.
+  products: {
+    enabled: bool(process.env.PRODUCTS_ENABLED, true),
+    resolver: (process.env.PRODUCT_RESOLVER || 'anthropic').toLowerCase(),
+    // Resolver modules ship WITH the app (code, not user data), like transformers.
+    resolversDir: path.join(__dirname, 'products', 'resolvers'),
+    // Durable product results, mirroring the receipt + profile-result stores.
+    resultsDir: path.join(dataDir, 'products'),
+    // Cap on line items resolved per receipt (each item is one backend call).
+    maxItems: int(process.env.PRODUCT_MAX_ITEMS, 100),
+    // Resolve products by default whenever an upload applies a receipt profile
+    // (opt out per-upload with resolveProducts=0). Products require a profile,
+    // so an upload with no profile (and no DEFAULT_PROFILE_ID) still won't resolve.
+    resolveOnUpload: bool(process.env.PRODUCT_RESOLVE_ON_UPLOAD, true),
+    anthropic: {
+      // Reuses the same Anthropic credentials/endpoint as the vision OCR path.
+      apiKey: process.env.ANTHROPIC_API_KEY || '',
+      model: process.env.PRODUCT_ANTHROPIC_MODEL || 'claude-haiku-4-5',
+      version: process.env.ANTHROPIC_VERSION || '2023-06-01',
+      baseUrl: process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
+      // Use Anthropic's server-side web_search/web_fetch tools so productUrl is a
+      // real, grounded link (the retrieval happens on Anthropic's infra, which is
+      // why it isn't blocked by the corporate TLS wall that breaks Tavily here).
+      // If the configured model can't use the tools, set PRODUCT_ANTHROPIC_MODEL
+      // to a model that can (e.g. claude-sonnet-4-6), or disable with =0.
+      webSearch: bool(process.env.PRODUCT_ANTHROPIC_WEB_SEARCH, true),
+    },
+  },
+
   // Enrichment via Tavily
   enrich: {
     enabled: bool(process.env.ENRICH_ENABLED, !!process.env.TAVILY_API_KEY),
