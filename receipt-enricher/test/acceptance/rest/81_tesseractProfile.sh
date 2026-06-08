@@ -2,7 +2,9 @@
 # REST: Receipt Profiles on the *Tesseract* pipeline — register the
 # `tesseractGroceryUs` profile and apply it to the offline-OCR'd receipt to
 # clean up Tesseract's noisy output (junk prefixes + embedded SKU codes,
-# ALL-CAPS text), recover the store name, and rewrite water items.
+# ALL-CAPS text) and recover the store name. Unlike usGrocery, it deliberately
+# PRESERVES the receipt's own abbreviations (e.g. "KS WATER GAL") rather than
+# expanding them.
 #
 # Tesseract-only: this step asserts cleanup that's meaningful on the messy
 # Tesseract output, so it SKIPS under --vision (a vision model already returns
@@ -69,9 +71,16 @@ assert_eq "SKU code stripped from description" "0" \
 caps_after="$(jq -r '[.items[] | select(.description | test("[A-Z]{2,}"))] | length' "$body")"
 assert_num_gt "cleanup reduced ALL-CAPS items"        "$raw_caps" "$caps_after"
 
-# --- store recovered from Kirkland items + water rewritten ------------------
+# --- store recovered; abbreviations preserved (NOT expanded like usGrocery) -
 assert_eq       "store inferred as Costco"            "Costco" "$(jq -r '.store.name' "$body")"
-assert_num_gt   "water item(s) rewritten"             "$(jq -r '[.items[] | select(.description=="Water 5 Liter")] | length' "$body")" "0"
+# tesseractGroceryUs intentionally KEEPS the receipt's own abbreviations
+# ("KS WATER GAL", "KS SPARK WAT") rather than expanding them. The
+# "water -> Water 5 Liter" rewrite belongs to the usGrocery transformer
+# (src/receiptProfiles/transformers/usGrocery.ts), exercised by 70/80_*.sh.
+# Assert the Tesseract profile did NOT apply it, so the two transformers don't
+# silently converge.
+assert_eq       "water NOT expanded to usGrocery form" "0" \
+  "$(jq -r '[.items[] | select(.description=="Water 5 Liter")] | length' "$body")"
 
 # --- read the persisted result back ----------------------------------------
 code="$(curl -sS -o "$body" -w '%{http_code}' \
