@@ -47,6 +47,24 @@ The flow:
 to offline Tesseract OCR and simply skips enrichment. Add a Tavily key to get
 images; add a vision key for much better item extraction.
 
+### Product resolution (optional final stage)
+
+When a **receipt profile** (a post-OCR cleanup step) is applied, the worker can
+map each cleaned line item to a real product — title, description, brand,
+category, and a substantiating link — via a configurable resolver (Anthropic by
+default, grounded with server-side web search). Per-SKU lookups run in a bounded
+parallel pool and are fronted by a **shared, Redis-backed cache**, so a product
+seen on an earlier receipt (or in another session) skips the backend call.
+
+- **Live monitor** — `GET /products/monitor` (alias `/observe/cache/products`):
+  an auto-refreshing console that tails lookups and makes cache hits obvious
+  (hit rate, backend time avoided).
+- **`products` CLI** — snapshot/restore the cache: `products cache export
+  cache.json` / `products cache import cache.json [--flush]`, e.g. to seed a
+  known cache before a test run instead of making live calls.
+
+See `receipt-enricher/docs/API.md` and the `receipt-enricher-dev` skill for the full surface.
+
 ---
 
 ## Components
@@ -54,13 +72,13 @@ images; add a vision key for much better item extraction.
 | Service  | What it is                          | Toolchain        |
 |----------|-------------------------------------|------------------|
 | `api`    | REST API + server-rendered web view | Node + Express   |
-| `worker` | Pipeline (extract → enrich)         | Node + BullMQ    |
-| `redis`  | Queue + enrichment cache            | Redis 7          |
+| `worker` | Pipeline (extract → enrich → resolve products) | Node + BullMQ    |
+| `redis`  | Queue + enrichment/product caches + lookup events | Redis 7          |
 | `bot`    | Telegram ingestion (optional)       | Node + Telegraf  |
-| `cli`    | Lightweight client                  | **bash + curl**  |
+| `cli`    | Lightweight clients (`receipts`, `products`) | **bash + curl**  |
 
-The CLI is deliberately not Node — it's a single bash script that calls the REST
-API with `curl` (and uses `jq` for pretty output if you have it). Nothing to
+The CLIs are deliberately not Node — they're single bash scripts that call the
+REST API with `curl` (and use `jq` for pretty output if you have it). Nothing to
 install.
 
 ---

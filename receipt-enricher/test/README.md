@@ -45,6 +45,18 @@ extraction paths are tested against one source of truth.
 | `workerDispatch.test.js`       | `worker`                   | pure `dispatch(job)` routes on `job.name` (`process-receipt` vs `applyProfile`) **without Redis**; unknown name throws |
 | `uploadProfile.test.js`        | `routes` (HTTP)            | upload with `profileId` enqueues the **OCR→profile flow** (unknown profile → 400, `DEFAULT_PROFILE_ID` fallback); `applyProfile?async=1` → `202` |
 
+### Products (line item → product; see the skill's "Products" section)
+
+| File | Layer | Highlights |
+|------|-------|-----------|
+| `products-registry.test.js`            | `products/registry`            | loads resolver modules, active = `config.products.resolver`, unknown id → null |
+| `products-resolver-anthropic.test.js`  | `products/resolvers/anthropic` | prompt build, web-tool **`allowed_callers:['direct']`**, JSON / `pause_turn` handling, field normalize |
+| `products-service.test.js`             | `products/resolveService`      | one product per item, `PRODUCT_MAX_ITEMS` cap, dryRun, null→skip / error note, disabled degrade |
+| `products-cache.test.js`               | `products/productCache` + service | repeat SKU **served from cache** (no 2nd backend call), price/qty don't bust the key, **bounded parallel pool** (peak concurrency), `cacheEnabled=false` bypass |
+| `products-monitor.test.js`             | `products/productEvents` + routes | per-lookup hit/miss events, `/api/products/events` summary stats, `/products/monitor` + **`/observe/cache/products` alias** shell |
+| `products-cache-io.test.js`            | `products/productCache` + routes  | export **excludes the event log**, import flush/skip rules, export→import round-trip, the cache REST endpoints |
+| `products-routes.test.js`              | `routes` (HTTP)                | resolver listing, sync/`dryRun`/`async` resolve, `404`/`409`, persisted read-back, cross-receipt listing |
+
 ## Hermetic by design
 
 Tests run **offline with no API keys and no Redis**:
@@ -53,7 +65,9 @@ Tests run **offline with no API keys and no Redis**:
   Tavily calls return canned responses — request shape is asserted, nothing
   leaves the machine.
 - **Redis** is replaced with an in-memory fake injected into the require cache,
-  so the enrichment cache and queue connections need no running server.
+  so the enrichment cache and queue connections need no running server. The fake
+  also implements the list/counter/scan ops (`lpush`/`lrange`/`ltrim`/`incr`/
+  `scan`/`ttl`/`del`) the product **event log** and **cache export/import** use.
 - **Data dir** is redirected to a fresh `os.tmpdir()` folder per file and
   cleaned up afterward — nothing is written under `data/`.
 

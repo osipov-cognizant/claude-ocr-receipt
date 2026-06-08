@@ -57,9 +57,18 @@ receipt-enricher/
 │  ├─ parse/receiptParser.js     # normalizeStructured() + parseText() heuristics
 │  ├─ enrich/ index.js tavily.js # Tavily lookup + Redis cache
 │  ├─ receiptProfiles/     # profile engine, registry, stores + transformers/ (see "Receipt profiles")
+│  ├─ products/            # product resolution stage (line item -> product info; see "Products")
+│  │  ├─ resolvers/        # backend adapters: anthropic.js (+ types.js); tavily later
+│  │  ├─ registry.js       # loads resolvers; active one = config.products.resolver
+│  │  ├─ resolveService.js # runs the resolver over a profile result's items (parallel pool + cache)
+│  │  ├─ productStore.js   # durable product results (data/products/<receiptId>/)
+│  │  ├─ productCache.js   # shared Redis cache in front of per-SKU lookups (+ export/import)
+│  │  └─ productEvents.js  # Redis ring buffer of per-lookup events (feeds /products/monitor)
+│  ├─ routes/products.js   # product REST + web views + live monitor + cache export/import
 │  ├─ web/view.js          # server-rendered HTML (renderReceipt / renderList)
 │  └─ healthcheck.js  healthcheck-worker.js   # container healthchecks (see Podman)
 ├─ cli/receipts            # bash + curl CLI (no Node needed)
+├─ cli/products            # bash + curl CLI: product cache export/import/stats
 ├─ test/                   # node:test suite — see test/README.md
 │  ├─ *.test.js            # hermetic (no network/redis/keys); run by `npm test`
 │  ├─ live/*.live.test.js  # real services; self-skip when prereqs absent
@@ -303,6 +312,108 @@ the route returns `400 {"error":"unknown profile \"foo\""}`, but the CLI's
 profileId=<name> localhost:8080/api/receipts; cat /tmp/b`. The fix is usually to
 register/seed the profile (see seeding above), not to change the upload.
 
+## Products (line item → product) — the final stage
+
+After a profile result exists, the **product resolver** maps each cleaned line
+item to product info: `productTitle`, `productDescription`, `productUrl` (the top
+substantiating web link), `brand`, `category`, `confidence`. The backend is a
+configurable **resolver adapter** chosen by config — exactly like `OCR_PROVIDER`
+picks the OCR engine, NOT a per-receipt record. This intentionally does **not**
+mirror receiptProfiles' CRUD model (there is no "product profile" object and no
+per-item config).
+
+- **Resolvers** live in `src/products/resolvers/` (code modules, like
+  transformers), loaded by `registry.js`, listed at `GET /api/productResolvers`.
+  The active one is `config.products.resolver` (`PRODUCT_RESOLVER`, default
+  `anthropic`). A `tavily` resolver is a future drop-in (deferred — Tavily is
+  TLS-blocked on this network; see gotchas).
+- **`anthropic` resolver** calls a low-end model (`PRODUCT_ANTHROPIC_MODEL`,
+  default `claude-haiku-4-5`) via raw `fetch` to `/v1/messages` (mirrors
+  `src/ocr/vision.js` — no SDK). With `PRODUCT_ANTHROPIC_WEB_SEARCH=1` (default)
+  it enables Anthropic's **server-side** `web_search`/`web_fetch` tools so the
+  link is real and grounded — the retrieval runs on Anthropic's infra, which is
+  why it works here even though direct Tavily/CDN fetches are TLS-blocked. It
+  handles `pause_turn` by re-sending.
+- **Input is always a profile result** (`receiptId` + `receiptProfileId`);
+  results are keyed by the source profile id at
+  `data/products/<receiptId>/<profileId>.json`.
+- **Graceful degrade** (mirrors enrich): no key / disabled → items list with null
+  product fields and `stats.skipped`; a per-item error is recorded in `error`.
+
+**Run it.** Three paths, mirroring profiles:
+- At upload: **on by default** whenever a profile is applied
+  (`PRODUCT_RESOLVE_ON_UPLOAD=1`) — a 3-level BullMQ flow `process-receipt` →
+  `applyProfile` → `resolveProducts`. Opt out per-upload with form field
+  `resolveProducts=0`. (Products need a profile, so an upload with no
+  `profileId`/`DEFAULT_PROFILE_ID` is OCR-only.) Note: the receipt reaches
+  `status:done` after OCR (the child job), *before* `applyProfile`/`resolveProducts`
+  run — so `receipts ... --wait` returns before products are ready; poll
+  `GET /api/receipts/<id>/products/<profile>` (404 until persisted).
+- After the fact: `POST /api/receipts/<id>/profileResults/<profileId>/resolveProducts`
+  (`?async=1` to queue, `?dryRun=1` to skip persistence).
+- Read: `GET /api/receipts/<id>/products[/<profileId>]`, `GET /api/products`;
+  HTML at `/products` and `/receipts/<id>/products/<profileId>/view` (renders only
+  a STORED result — never resolves fresh on a GET, since resolution makes live
+  backend calls). Job ids stay `:`-free: `resolveProducts-<receiptId>-<profileId>`.
+
+**Config** (`config.products`): `enabled` (`PRODUCTS_ENABLED`), `resolver`,
+`maxItems` (`PRODUCT_MAX_ITEMS`, default 100), `concurrency` (`PRODUCT_CONCURRENCY`,
+default 5), `cacheEnabled`/`cacheTtlSeconds` (`PRODUCT_CACHE_ENABLED`,
+`PRODUCT_CACHE_TTL_SECONDS`, default 30d), `eventsMax` (`PRODUCT_EVENTS_MAX`,
+default 500), `resolveOnUpload`, and an `anthropic` block reusing the vision
+Anthropic creds. `/health` includes `products: { enabled, resolver }`.
+
+**Gotcha — web tools on Haiku need `allowed_callers: ['direct']`.** The
+`web_search_20260209`/`web_fetch_20260209` tools default to the *programmatic
+tool calling* (dynamic-filtering) caller, which Haiku 4.5 does NOT support —
+without `allowed_callers: ['direct']` every resolve 400s with "does not support
+programmatic tool calling". `resolvers/anthropic.js#buildTools` sets it; keep it.
+Verified live: with the fix, Haiku 4.5 resolves clean vision line items to real
+products with grounded retailer URLs. (Fallback: `PRODUCT_ANTHROPIC_MODEL=claude-sonnet-4-6`.)
+
+**Performance — shared cache + parallel lookups.** Each SKU lookup is an
+independent, network-bound backend call, so `resolveService` resolves a receipt's
+items in a **bounded parallel pool** (`PRODUCT_CONCURRENCY`, default 5) instead of
+one-at-a-time, and fronts every lookup with a **shared, Redis-backed cache**
+(`src/products/productCache.js`). The key is `products:<resolver>:sha1(store|sku|
+description)` — price/qty are deliberately excluded so the same product recurring
+across receipts/sessions is a hit. It lives in Redis, so it's shared across all
+worker/server processes (not per-process); only non-null results are cached
+(mirrors enrich), and a Redis error degrades to a miss, never a failure.
+`stats.cached` is a sub-count of `stats.resolved` (so `resolved+skipped+errors`
+still equals the item count). Config: `PRODUCT_CACHE_ENABLED`,
+`PRODUCT_CACHE_TTL_SECONDS` (default 30d).
+
+**Live monitor (technical console).** `GET /products/monitor` (alias
+`/observe/cache/products`; `?interval=<sec>`, a trailing `s` is tolerated) is a
+dark, auto-refreshing, autoscrolling page that tails product lookups and makes
+**cache HITs obvious** (green rows, ~0 ms latency, live hit-rate /
+backend-time-avoided). It polls `GET /api/products/events`, a JSON feed over a
+Redis ring buffer of per-lookup events (`src/products/productEvents.js`, list
+`products:events`, capped by `PRODUCT_EVENTS_MAX` (default 500; `0` disables)).
+The buffer is Redis-backed ON PURPOSE: the **worker** resolves while the
+**server** renders the page — different processes — so an in-process array
+wouldn't be visible. Each event: `{seq, ts, outcome: hit|miss|empty|error,
+latencyMs, store, sku, description, productTitle, confidence, cacheKey,
+receiptId, model, dryRun}`.
+
+**`products` CLI + cache export/import.** A companion bash+curl CLI (`cli/products`,
+alongside `cli/receipts`) manages the product layer — chiefly snapshotting the
+shared cache:
+- `products cache export <path.json>` → `GET /api/products/cache/export`
+- `products cache import <path.json> [--flush]` → `POST /api/products/cache/import` (`?flush=1`)
+- `products cache stats` → `GET /api/products/cache/stats`
+- `products resolvers` / `products health`
+
+Export/import is a **parallel, offline path to populating product data** — seed a
+known cache before an acceptance run so SKU lookups are served from cache instead
+of live Anthropic calls. The export doc is `{type:"receipt-enricher/products-
+cache", version, exportedAt, resolver, count, entries:[{key,value,ttlSeconds}]}`;
+import accepts that or a bare entries array, skips reserved `products:events*`
+keys, and falls back to `PRODUCT_CACHE_TTL_SECONDS` when an entry omits a TTL. The
+acceptance step `test/acceptance/cli/50_productsCacheIo.sh` exercises the
+round-trip fully offline (no Anthropic key needed).
+
 ## Environment gotchas (hard-won — check these first when something "doesn't work")
 
 This repo is developed on a corporate-managed network, which causes several
@@ -407,6 +518,29 @@ cache/Redis is never touched), then `npm run server` and open
 built-in list if the file is missing. **Add/adjust an extractor:** `src/ocr/`.
 **Change the web view:** `src/web/view.js` (pure, dependency-free, unit-tested).
 
+**Resolve products for a receipt's profile result (after a profile is applied):**
+```bash
+curl -fsS -X POST "localhost:8080/api/receipts/$ID/profileResults/tesseractGroceryUs1/resolveProducts" | jq .
+# then: open "localhost:8080/receipts/$ID/products/tesseractGroceryUs1/view"
+```
+A 409 means the profile hasn't been applied yet; all-`skipped` means no
+`ANTHROPIC_API_KEY` (degrades, no network). If items 400 with "does not support
+programmatic tool calling", the web-tool `allowed_callers` fix is missing (see
+Products) — or set `PRODUCT_ANTHROPIC_MODEL=claude-sonnet-4-6`.
+
+**Watch product lookups + cache hits live:** open `localhost:8080/products/monitor`
+(or `/observe/cache/products?interval=3s`) and resolve/upload some receipts —
+cache HITs show green at ~0 ms vs amber backend misses. JSON behind it:
+`curl -fsS "localhost:8080/api/products/events?limit=50" | jq .stats`.
+
+**Snapshot / restore the product cache (e.g. seed a known cache before an
+acceptance run so SKU lookups are cache hits, not live Anthropic calls):**
+```bash
+API_URL=http://localhost:8080 ./cli/products cache export /tmp/cache.json
+API_URL=http://localhost:8080 ./cli/products cache import /tmp/cache.json --flush
+API_URL=http://localhost:8080 ./cli/products cache stats
+```
+
 ## Guardrails
 
 - Keep `npm test` hermetic — never let it require network, Redis, or keys.
@@ -423,6 +557,20 @@ built-in list if the file is missing. **Add/adjust an extractor:** `src/ocr/`.
 - The acceptance suite must stay isolated: never point its teardown at the prod
   project, never bind the prod host port. Defaults (`test-receipt-enricher`,
   18080) already ensure this; the teardown guard refuses the prod name.
+- **Tesseract blobs aren't in git** (`tessdata/*.traineddata` are gitignored;
+  only `tessdata/README.md` is tracked). A fresh `git worktree` therefore lacks
+  them, and `Dockerfile`'s `COPY . .` then bakes an EMPTY tessdata into the image
+  → OCR fails at runtime with a cryptic "tesseract worker error" and the receipt
+  goes `failed`. When building from a worktree, copy `eng.traineddata` +
+  `osd.traineddata` from a full checkout into the worktree's `tessdata/` first.
+  The acceptance step `test/acceptance/stack/10_container_contents.sh` (runs first
+  in `run-all.sh`) asserts both blobs are baked into the worker+api containers, so
+  this fails fast with a clear message instead of the opaque OCR error.
+- **Products require a profile result.** `resolveService` reads
+  `data/profileResults/<receiptId>/<profileId>.json`; it 409s if the profile
+  hasn't been applied. The product HTML view renders only a STORED result (never
+  resolves fresh on a GET — resolution makes live backend calls). Server-side web
+  tools on Haiku need `allowed_callers: ['direct']` (see Products).
 - **Keep `docs/API.md` in sync with the routes.** It's the canonical HTTP API
   reference. Whenever you add, remove, or change an endpoint in
   `src/routes/*.js` (path, method, query params, request/response shape, or
