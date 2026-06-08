@@ -1,15 +1,17 @@
 'use strict';
 
-const fsp = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
+const fsp = require('fs/promises');
 const config = require('../config');
 const identity = require('../identity');
+const persistence = require('../persistence');
 const { validateProfile } = require('./validate');
 
 // Profile DEFINITIONS are scoped per TENANT (shared by all users in a tenant,
-// unlike receipts/results which are per user):
-//   <dataDir>/<tenant>/receiptProfiles/<rp_id>.json
+// unlike receipts/results which are per user) and persisted through the
+// pluggable persistence layer:
+//   kind='receiptProfiles', { tenant, id: rp_id }   (no user segment)
 // Every function takes a trailing `{ tenantId }` (default: the configured
 // tenant), so single-tenant callers can omit it. Each tenant is seeded with the
 // shipped example profiles on first touch.
@@ -19,8 +21,8 @@ function tenantOf(opts) {
   if (!identity.isValidSegment(t)) throw new identity.IdentityError(400, `invalid tenant id "${t}"`);
   return t;
 }
-function dirFor(tenantId) {
-  return identity.tenantDataDir(tenantId, 'receiptProfiles');
+function keyFor(tenantId, id) {
+  return { kind: 'receiptProfiles', tenant: tenantId, id };
 }
 
 function isPlainObject(v) {
@@ -29,10 +31,6 @@ function isPlainObject(v) {
 
 function newId() {
   return 'rp_' + crypto.randomUUID().replace(/-/g, '').slice(0, 16);
-}
-
-function profilePath(tenantId, id) {
-  return path.join(dirFor(tenantId), `${id}.json`);
 }
 
 class ValidationError extends Error {
@@ -44,22 +42,7 @@ class ValidationError extends Error {
 }
 
 async function readAll(tenantId) {
-  let files;
-  try {
-    files = await fsp.readdir(dirFor(tenantId));
-  } catch {
-    return [];
-  }
-  const out = [];
-  for (const f of files) {
-    if (!f.endsWith('.json')) continue;
-    try {
-      out.push(JSON.parse(await fsp.readFile(path.join(dirFor(tenantId), f), 'utf8')));
-    } catch {
-      /* skip unreadable */
-    }
-  }
-  return out;
+  return persistence.list({ kind: 'receiptProfiles', tenant: tenantId });
 }
 
 async function list(opts) {
@@ -73,22 +56,14 @@ async function list(opts) {
 async function get(idOrName, opts) {
   const tenantId = tenantOf(opts);
   if (idOrName && idOrName.startsWith('rp_')) {
-    try {
-      return JSON.parse(await fsp.readFile(profilePath(tenantId, idOrName), 'utf8'));
-    } catch (err) {
-      if (err.code === 'ENOENT') return null;
-      throw err;
-    }
+    return persistence.get(keyFor(tenantId, idOrName));
   }
   const all = await readAll(tenantId);
   return all.find((p) => p.name === idOrName) || null;
 }
 
 async function writeAtomic(tenantId, profile) {
-  await fsp.mkdir(dirFor(tenantId), { recursive: true });
-  const tmp = profilePath(tenantId, profile.id) + '.tmp';
-  await fsp.writeFile(tmp, JSON.stringify(profile, null, 2));
-  await fsp.rename(tmp, profilePath(tenantId, profile.id));
+  await persistence.put(keyFor(tenantId, profile.id), profile);
   return profile;
 }
 
@@ -144,7 +119,7 @@ async function remove(idOrName, opts) {
   const tenantId = tenantOf(opts);
   const existing = await get(idOrName, { tenantId });
   if (!existing) return false;
-  await fsp.unlink(profilePath(tenantId, existing.id)).catch(() => {});
+  await persistence.delete(keyFor(tenantId, existing.id)).catch(() => {});
   return true;
 }
 
@@ -156,7 +131,8 @@ async function count(opts) {
  * Seed the shipped example profiles for a tenant when it has none (first touch),
  * the same idea as the bundled store-aliases.json. Invalid or duplicate seeds are
  * skipped so a bad seed file can't crash startup. Called at boot for the default
- * tenant and when a new tenant is provisioned.
+ * tenant and when a new tenant is provisioned. Seed files ship WITH the app, so
+ * they're read from the filesystem here regardless of the persistence backend.
  */
 async function seedIfEmpty(opts) {
   const tenantId = tenantOf(opts);

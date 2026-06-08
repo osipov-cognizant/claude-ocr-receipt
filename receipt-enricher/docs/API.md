@@ -131,6 +131,7 @@ curl -fsS "$BASE/health" | jq .
 {
   "status": "ok",
   "redis": "up",
+  "persistence": "sqlite",
   "ocrProvider": "vision",
   "enrichment": "disabled",
   "tenants": 1,
@@ -141,7 +142,8 @@ curl -fsS "$BASE/health" | jq .
 }
 ```
 Returns `200` when Redis is reachable, `503` (`status: "degraded"`) otherwise.
-`receiptProfiles` counts the **default tenant's** profiles.
+`receiptProfiles` counts the **default tenant's** profiles. `persistence` reports
+the active durable-record backend (`filesystem` \| `sqlite` \| `postgresql`).
 
 ### Tenant accounts
 

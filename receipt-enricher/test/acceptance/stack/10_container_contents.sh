@@ -48,6 +48,16 @@ done
 
 # The wasm OCR core must be installed (npm ci), or Tesseract can't run offline.
 check_path  worker "/app/node_modules/tesseract.js-core" "tesseract.js-core wasm present"
+
+# better-sqlite3 is a NATIVE module: its prebuilt binary must be baked in and
+# loadable for this image's arch (the Dockerfile vendors it offline). Verify it
+# actually loads in BOTH services — a missing/mismatched binary otherwise only
+# surfaces (under PERSISTENCE=sqlite) as a cryptic runtime crash. Cheap to check
+# regardless of the active backend.
+for svc in worker api; do
+  out="$(in_container "$svc" "node -e \"new (require('better-sqlite3'))(':memory:').exec('SELECT 1'); console.log('ok')\" 2>/dev/null" | tr -dc 'a-z')"
+  assert_eq "better-sqlite3 native module loads [$svc]" "ok" "$out"
+done
 # Sanity: app source actually copied in.
 check_path  worker "/app/src/server.js" "app source present"
 check_path  worker "/app/src/products/resolvers/anthropic.js" "products resolver present"

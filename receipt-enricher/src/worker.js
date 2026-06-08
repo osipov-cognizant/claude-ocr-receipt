@@ -94,6 +94,7 @@ function start() {
 
   let timer = null;
   (async () => {
+    await tenants.hydrate(); // repopulate the Redis SET from the durable list
     await tenants.ensureDefault(); // the default tenant always has a queue
     await sync();
     timer = setInterval(sync, watchMs);

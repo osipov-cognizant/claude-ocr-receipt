@@ -47,6 +47,7 @@ function createApp() {
     res.status(ok ? 200 : 503).json({
       status: ok ? 'ok' : 'degraded',
       redis,
+      persistence: config.persistence.backend,
       ocrProvider: config.ocrProvider,
       enrichment: config.enrich.enabled ? 'enabled' : 'disabled',
       tenants: tenantCount,

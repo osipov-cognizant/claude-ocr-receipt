@@ -3,31 +3,33 @@
 const fsp = require('fs/promises');
 const path = require('path');
 const identity = require('./identity');
+const persistence = require('./persistence');
 
-// Records and images are stored per tenant/user:
-//   <dataDir>/<tenant>/<user>/receipts/<cacheId>.json
-//   <dataDir>/<tenant>/<user>/uploads/<cacheId>.<ext>
-// A receipt's public `id` is the COMPOSITE id `<tenant>:<user>:<cacheId>`, so it
-// self-describes its location; the store parses it (src/identity.js) to find the
-// scoped paths. Directories are created lazily per scope on first write.
+// Receipt records are durable DOCUMENTS keyed by identity, persisted through the
+// pluggable persistence layer (src/persistence — filesystem or sqlite):
+//   kind='receipts', { tenant, user, id: cacheId }
+// A receipt's public `id` is the COMPOSITE id `<tenant>:<user>:<cacheId>`, which
+// the store parses (src/identity.js) to derive the document key.
+//
+// Uploaded image blobs are NOT records — they always live on the filesystem at
+// `<dataDir>/<tenant>/<user>/uploads/<cacheId>.<ext>` regardless of persistence
+// backend (a dedicated blob-store abstraction comes later). `imagePathFor` and
+// `createReceipt`'s image write therefore stay on fs/promises.
 
 function newId() {
   return identity.newCacheId();
 }
 
-function receiptsDir(scope) {
-  return identity.userDataDir(scope, 'receipts');
-}
 function uploadsDir(scope) {
   return identity.userDataDir(scope, 'uploads');
 }
 
-// Resolve a composite (or bare) id to its on-disk record path, or null if the id
-// is malformed (so callers surface a clean 404 rather than throwing).
-function recordPathOf(id) {
+// Resolve a composite (or bare) id to its persistence key, or null if the id is
+// malformed (so callers surface a clean 404 rather than throwing).
+function keyOf(id) {
   try {
     const r = identity.resolveId(id);
-    return path.join(receiptsDir({ tenantId: r.tenantId, userId: r.userId }), `${r.cacheId}.json`);
+    return { kind: 'receipts', tenant: r.tenantId, user: r.userId, id: r.cacheId };
   } catch {
     return null;
   }
@@ -92,31 +94,22 @@ async function createReceipt({ buffer, mimeType, originalName, source, tenantId,
 }
 
 async function save(record) {
-  const target = recordPathOf(record.id);
-  if (!target) throw new identity.IdentityError(400, `cannot save record with invalid id "${record.id}"`);
-  await fsp.mkdir(path.dirname(target), { recursive: true });
+  const key = keyOf(record.id);
+  if (!key) throw new identity.IdentityError(400, `cannot save record with invalid id "${record.id}"`);
   record.updatedAt = new Date().toISOString();
-  const tmp = target + '.tmp';
-  await fsp.writeFile(tmp, JSON.stringify(record, null, 2));
-  await fsp.rename(tmp, target); // atomic-ish write
+  await persistence.put(key, record);
   return record;
 }
 
 async function get(id) {
-  const target = recordPathOf(id);
-  if (!target) return null; // malformed id -> treat as not found
-  try {
-    const raw = await fsp.readFile(target, 'utf8');
-    return JSON.parse(raw);
-  } catch (err) {
-    if (err.code === 'ENOENT') return null;
-    throw err;
-  }
+  const key = keyOf(id);
+  if (!key) return null; // malformed id -> treat as not found
+  return persistence.get(key);
 }
 
 /**
  * Read-modify-write merge. Single-worker concurrency keeps this safe for the
- * scaffold; for multi-worker setups switch to a Redis-backed record store.
+ * scaffold; for multi-worker setups switch to a record-level lock.
  */
 async function update(id, patch) {
   const current = await get(id);
@@ -132,27 +125,11 @@ async function update(id, patch) {
 async function list({ tenantId, userId, limit = 50 } = {}) {
   const def = identity.defaultScope();
   const scope = { tenantId: tenantId || def.tenantId, userId: userId || def.userId };
-  let dir;
+  let records;
   try {
-    dir = receiptsDir(scope);
+    records = await persistence.list({ kind: 'receipts', tenant: scope.tenantId, user: scope.userId });
   } catch {
     return []; // invalid scope -> nothing to list
-  }
-  let files;
-  try {
-    files = await fsp.readdir(dir);
-  } catch {
-    return [];
-  }
-  const records = [];
-  for (const f of files) {
-    if (!f.endsWith('.json')) continue;
-    try {
-      const raw = await fsp.readFile(path.join(dir, f), 'utf8');
-      records.push(JSON.parse(raw));
-    } catch {
-      /* skip unreadable */
-    }
   }
   records.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   return records.slice(0, limit);

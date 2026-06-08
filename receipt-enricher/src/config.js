@@ -63,6 +63,24 @@ const config = {
   dataDir,
   maxUploadBytes: int(process.env.MAX_UPLOAD_MB, 15) * 1024 * 1024,
 
+  // Pluggable persistence layer for the durable record stores (receipts, profile
+  // definitions, profile results, product results, and the tenant registry).
+  // The backend is chosen here — exactly like OCR_PROVIDER picks the OCR engine —
+  // NOT per-record. `sqlite` (the default) stores documents in a single SQLite
+  // table; `filesystem` (the original approach) writes scope-partitioned JSON
+  // files under dataDir. `postgresql` is a planned drop-in (TODO) — not
+  // implemented yet. NOTE: uploaded image blobs always stay on the filesystem
+  // (under uploads/) regardless of backend; a separate blob-store abstraction
+  // comes later.
+  persistence: {
+    backend: (process.env.PERSISTENCE || 'sqlite').toLowerCase(), // sqlite | filesystem | postgresql(TODO)
+    sqlite: {
+      // SQLite database file. Defaults under dataDir so it shares the data
+      // volume; override with SQLITE_PATH (e.g. a dedicated mounted file).
+      path: path.resolve(process.env.SQLITE_PATH || path.join(dataDir, 'receipt-enricher.db')),
+    },
+  },
+
   // Receipt Profiles: user-defined transformation rules applied to a parsed
   // receipt (see docs/RECEIPT-PROFILES.md). Definitions and results are durable
   // JSON, mirroring the receipt store. Limits guard the user-supplied rules

@@ -22,6 +22,8 @@ extraction paths are tested against one source of truth.
 | `parser.test.js`     | `parse/receiptParser` | line-item + price extraction, SKU pull-off, noise filtering, **TOTAL-vs-SUBTOTAL regression guard**, structured-vs-OCR agreement, store canonicalization, **`subtotalMatch` reconciliation (true/false/null)** |
 | `store-aliases.test.js` | `parse` (config) | the **configurable store-alias JSON** (`STORE_ALIASES_PATH`): multi-word vision names + custom aliases resolve to their canonical chain; unknown names kept verbatim |
 | `store.test.js`      | `store`               | persists the **actual sample JPEG** byte-for-byte, record CRUD, newest-first listing, mime→extension |
+| `persistence.test.js` | `persistence/backends/*` | the generic backend **contract run against BOTH `filesystem` + `sqlite`**: get/put/delete/list, scope isolation, sub-keyed nesting, tenant-scoped + global kinds |
+| `persistence-stores.test.js` | stores + `tenants` (on filesystem) | the four record stores + tenant registry driven through their public APIs with **`PERSISTENCE=filesystem`** pinned (SQLite is the default, so the rest of the suite already covers it); tenant list **survives a Redis recycle via `hydrate()`** |
 | `enrich.test.js`     | `enrich` + Tavily     | graceful skip when disabled, Tavily image/metadata mapping, **Redis cache hit avoids re-spending credits**, `ENRICH_MAX_ITEMS` cap, per-item error isolation |
 | `ocr-vision.test.js` | `ocr/vision`          | Anthropic + OpenAI request shapes, base64 image attach, ```json``` fence stripping, prose-wrapped JSON recovery, API-error surfacing |
 | `ocr-index.test.js`  | `ocr` (dispatch)      | provider selection (`vision` vs `tesseract`) from config, record pass-through, **provider tag on the result** |

@@ -35,6 +35,10 @@ services:
       NODE_ENV: production
       REDIS_URL: redis://redis:6379
       DATA_DIR: /app/data
+      # Durable record backend: sqlite (default) | filesystem. The SQLite DB
+      # defaults to /app/data/receipt-enricher.db — on the shared data volume, so
+      # it survives restarts and is reachable by both api and worker.
+      PERSISTENCE: ${PERSISTENCE:-sqlite}
       # 'auto' picks vision when a key is present, else tesseract (prod default).
       # The acceptance suite sets this explicitly (tesseract by default).
       OCR_PROVIDER: ${OCR_PROVIDER:-auto}
@@ -80,6 +84,7 @@ services:
       NODE_ENV: production
       REDIS_URL: redis://redis:6379
       DATA_DIR: /app/data
+      PERSISTENCE: ${PERSISTENCE:-sqlite}
       OCR_PROVIDER: ${OCR_PROVIDER:-auto}
       DEFAULT_PROFILE_ID: ${DEFAULT_PROFILE_ID:-}
     labels:

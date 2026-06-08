@@ -319,6 +319,8 @@ All via `.env` (see `.env.example`). Highlights:
 | `ENRICH_MAX_ITEMS`   | `40`                     | cap Tavily lookups per receipt               |
 | `QUEUE_CONCURRENCY`  | `2`                      | parallel receipts in the worker              |
 | `JOB_ATTEMPTS`       | `3`                      | retries with exponential backoff             |
+| `PERSISTENCE`        | `sqlite`                 | durable record backend: `sqlite` \| `filesystem` \| `postgresql` (TODO). Image blobs always stay on the filesystem |
+| `SQLITE_PATH`        | `<DATA_DIR>/receipt-enricher.db` | SQLite database file (only when `PERSISTENCE=sqlite`) |
 | `DEFAULT_PROFILE_ID` | —                        | receipt profile (id or name) applied to uploads that omit one |
 | `PRODUCTS_ENABLED`   | `true`                   | master switch for the product-resolution stage |
 | `PRODUCT_RESOLVER`   | `anthropic`              | backend resolver/adapter (the only one shipped; `tavily` is a future drop-in) |
@@ -410,7 +412,8 @@ receipt-enricher/
    ├─ worker.js            # BullMQ worker
    ├─ bot.js               # Telegram bot
    ├─ queue.js  redis.js   # queue + connections
-   ├─ store.js             # durable receipt records (JSON + image)
+   ├─ persistence/         # pluggable record backend (filesystem | sqlite | TODO postgresql)
+   ├─ store.js             # durable receipt records (via persistence; image stays on fs)
    ├─ healthcheck.js  healthcheck-worker.js   # container healthchecks
    ├─ pipeline/            # extract → parse → enrich → summarize
    ├─ ocr/                 # vision + tesseract providers

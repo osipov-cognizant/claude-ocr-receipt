@@ -11,6 +11,11 @@ node_modules/
 data/uploads/*
 data/receipts/*
 !data/.gitkeep
+# SQLite persistence DB + filesystem tenant registry (local runs)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/.registry/
 
 npm-debug.log*
 *.log
@@ -25,3 +30,8 @@ analysis/
 # Tesseract language data (large; fetch per machine — see tessdata/README.md)
 tessdata/*.traineddata
 tessdata/*.traineddata.gz
+
+# Vendored native prebuilt binaries (better-sqlite3); fetched per machine like
+# tessdata — see .vendor/README.md. Present in the build context for the
+# Dockerfile's offline native install; not committed.
+.vendor/*.tar.gz

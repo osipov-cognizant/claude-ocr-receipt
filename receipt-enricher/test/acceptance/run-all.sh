@@ -6,26 +6,30 @@
 #   --engine podman|docker     RE_TEST_ENGINE       (default podman)
 #   --ocr tesseract|vision     RE_TEST_OCR          (default tesseract, offline)
 #   --vision                   shortcut for --ocr vision
+#   --persistence fs|sqlite    RE_TEST_PERSISTENCE  (default filesystem)
+#   --sqlite                   shortcut for --persistence sqlite
 #   --keep-volumes             RE_TEST_KEEP_VOLUMES=1 (keep data on teardown)
 #   --no-teardown              RE_TEST_NO_TEARDOWN=1  (leave the stack running)
 #   -h | --help
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --engine)       RE_TEST_ENGINE="${2:?}"; shift 2 ;;
     --ocr)          RE_TEST_OCR="${2:?}"; shift 2 ;;
     --vision)       RE_TEST_OCR="vision"; shift ;;
+    --persistence)  RE_TEST_PERSISTENCE="${2:?}"; shift 2 ;;
+    --sqlite)       RE_TEST_PERSISTENCE="sqlite"; shift ;;
     --keep-volumes) RE_TEST_KEEP_VOLUMES=1; shift ;;
     --no-teardown)  RE_TEST_NO_TEARDOWN=1; shift ;;
     -h|--help)      usage 0 ;;
     *) echo "unknown arg: $1" >&2; usage 1 ;;
   esac
 done
-export RE_TEST_ENGINE RE_TEST_OCR RE_TEST_KEEP_VOLUMES RE_TEST_NO_TEARDOWN 2>/dev/null || true
+export RE_TEST_ENGINE RE_TEST_OCR RE_TEST_PERSISTENCE RE_TEST_KEEP_VOLUMES RE_TEST_NO_TEARDOWN 2>/dev/null || true
 
 . "$DIR/lib/common.sh"
 . "$DIR/lib/compose.sh"

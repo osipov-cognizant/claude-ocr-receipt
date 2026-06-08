@@ -13,6 +13,7 @@ const app = createApp();
 // Other tenants are provisioned (and seeded) on demand via POST /api/tenants.
 (async () => {
   try {
+    await tenants.hydrate(); // repopulate the Redis SET from the durable list
     await tenants.ensureDefault();
     const n = await profileStore.seedIfEmpty();
     if (n) logger.info({ tenant: config.defaultTenantId, seeded: n }, 'seeded receipt profiles');

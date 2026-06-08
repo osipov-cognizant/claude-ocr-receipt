@@ -30,6 +30,30 @@ function useTempDataDir(label = 'receipt-test') {
 }
 
 /**
+ * Point PERSISTENCE at the sqlite backend with a throwaway temp DB file. Must be
+ * called BEFORE the first `require('../src/config')` (config reads the env at
+ * load time). Returns the db path + a cleanup that removes the file and its
+ * WAL/SHM siblings.
+ * @returns {{ path: string, cleanup: () => void }}
+ */
+function useTempSqlite(label = 'receipt-sqlite') {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `${label}-`));
+  const dbPath = path.join(dir, 'test.db');
+  process.env.PERSISTENCE = 'sqlite';
+  process.env.SQLITE_PATH = dbPath;
+  return {
+    path: dbPath,
+    cleanup() {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* best effort */
+      }
+    },
+  };
+}
+
+/**
  * Inject an in-memory fake of src/redis.js into the require cache so modules
  * that `require('../redis')` (enrich, queue, server) get a working `cache()`
  * with no real Redis. Call BEFORE requiring those modules.
@@ -192,6 +216,7 @@ function textResponse(text, { ok = false, status = 500 } = {}) {
 
 module.exports = {
   useTempDataDir,
+  useTempSqlite,
   installFakeRedis,
   stubFetch,
   jsonResponse,

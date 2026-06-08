@@ -43,7 +43,7 @@ in_container() {
 
 # Build + start the test stack, then wait until /health is OK.
 stack_up() {
-  info "engine=$RE_TEST_ENGINE  project=$RE_TEST_PROJECT  port=$RE_TEST_API_PORT  ocr=$RE_TEST_OCR"
+  info "engine=$RE_TEST_ENGINE  project=$RE_TEST_PROJECT  port=$RE_TEST_API_PORT  ocr=$RE_TEST_OCR  persistence=$RE_TEST_PERSISTENCE"
   info "building + starting the test stack ..."
   compose up --build -d || die "compose up failed"
   wait_healthy

@@ -17,6 +17,8 @@ RE_TEST_PROJECT="${RE_TEST_PROJECT:-test-receipt-enricher}" # compose project (i
 RE_TEST_API_PORT="${RE_TEST_API_PORT:-18080}"              # host port (coexist with prod 8080)
 RE_TEST_BASE="${RE_TEST_BASE:-http://localhost:${RE_TEST_API_PORT}}"
 RE_TEST_OCR="${RE_TEST_OCR:-tesseract}"                    # tesseract (offline) | vision (anthropic)
+RE_TEST_PERSISTENCE="${RE_TEST_PERSISTENCE:-sqlite}"       # sqlite (default) | filesystem (durable record backend)
+[ "$RE_TEST_PERSISTENCE" = "fs" ] && RE_TEST_PERSISTENCE="filesystem"  # accept the 'fs' shorthand
 # OCR now auto-corrects orientation, so the old upright `rotated_*` copies were
 # removed — point at the as-shot sample (any orientation works).
 RE_TEST_SAMPLE="${RE_TEST_SAMPLE:-$REPO_DIR/samples/costco/PXL_20260526_235419811.jpg}"
@@ -35,6 +37,7 @@ export RECEIPT_PROJECT="$RE_TEST_PROJECT"
 export RECEIPT_API_PORT="$RE_TEST_API_PORT"
 export RECEIPT_SUITE="test"
 export OCR_PROVIDER="$RE_TEST_OCR"
+export PERSISTENCE="$RE_TEST_PERSISTENCE"
 # Make the API advertise host-reachable links (statusUrl/viewUrl) on the test
 # port, not the container-internal 8080.
 export PUBLIC_BASE_URL="$RE_TEST_BASE"

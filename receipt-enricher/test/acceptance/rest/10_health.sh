@@ -12,6 +12,7 @@ assert_http     "GET /health"                 "200" "$code"
 assert_eq       "GET /health: status ok"      "ok"  "$(jq -r '.status' "$body")"
 assert_eq       "GET /health: redis up"       "up"  "$(jq -r '.redis' "$body")"
 assert_nonempty "GET /health: ocrProvider"    "$(jq -r '.ocrProvider' "$body")"
+assert_eq       "GET /health: persistence backend" "$RE_TEST_PERSISTENCE" "$(jq -r '.persistence' "$body")"
 rm -f "$body"
 
 report

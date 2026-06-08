@@ -23,7 +23,8 @@ test/acceptance/
    ├─ 80_uploadWithProfile.sh   # upload with profileId → OCR-then-profile BullMQ flow
    ├─ 81_tesseractProfile.sh    # tesseractGroceryUs cleanup profile (Tesseract mode only)
    ├─ 90_resolveProducts.sh     # resolve products from a profile result (sync/async/dryRun)
-   └─ 95_multitenancy.sh        # dynamic tenant onboarding, per-tenant queues, cross-tenant/user isolation
+   ├─ 95_multitenancy.sh        # dynamic tenant onboarding, per-tenant queues, cross-tenant/user isolation
+   └─ 96_persistence.sh         # active backend (filesystem|sqlite) + record survives an api/worker restart
 ```
 
 Steps auto-discover: `run-all.sh` runs every `cli/*.sh` then `rest/*.sh` in name
@@ -62,6 +63,9 @@ bash test/acceptance/run-all.sh --keep-volumes
 # Use the Anthropic vision path instead of offline Tesseract:
 bash test/acceptance/run-all.sh --vision        # (or --ocr vision)
 
+# Exercise the SQLite persistence backend instead of the filesystem default:
+bash test/acceptance/run-all.sh --sqlite         # (or --persistence sqlite)
+
 # Run individual steps (stack must be up first):
 bash test/acceptance/lifecycle/00_up.sh
 bash test/acceptance/rest/20_upload.sh
@@ -92,6 +96,7 @@ message if the stack isn't up.
 | `RE_TEST_API_PORT` | `18080` | host port for the test API |
 | `RE_TEST_BASE` | `http://localhost:$RE_TEST_API_PORT` | base URL the steps hit |
 | `RE_TEST_OCR` | `tesseract` | `tesseract` or `vision` |
+| `RE_TEST_PERSISTENCE` | `filesystem` | durable record backend: `filesystem` or `sqlite` (`fs` accepted) |
 | `RE_TEST_SAMPLE` | upright costco sample | receipt image to upload |
 | `RE_TEST_KEEP_VOLUMES` | `0` | `1` keeps volumes on teardown |
 | `RE_TEST_NO_TEARDOWN` | `0` | `1` leaves the stack running after `run-all.sh` |
