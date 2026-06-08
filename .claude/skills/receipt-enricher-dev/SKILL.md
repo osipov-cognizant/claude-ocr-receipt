@@ -51,9 +51,10 @@ receipt-enricher/
 │  ├─ bot.js               # Telegram bot (optional; relays to the REST API)
 │  ├─ config.js            # all env-driven config (READ THIS to understand modes)
 │  ├─ identity.js          # MULTI-TENANCY: composite-id scheme + scoped path/key + jobId helpers
-│  ├─ tenants.js           # Redis-backed tenant registry (accounts; the worker watches it)
+│  ├─ tenants.js           # tenant registry: durable (persistence) + Redis SET; hydrate() at boot
 │  ├─ queue.js  redis.js   # PER-TENANT BullMQ queues (receipts-<tenant>) + ioredis connections
-│  ├─ store.js             # durable receipt records, scoped <dataDir>/<tenant>/<user>/...
+│  ├─ persistence/         # PLUGGABLE record backend (PERSISTENCE): sqlite (default) | filesystem | TODO postgresql
+│  ├─ store.js             # durable receipt records via persistence; image blob stays on fs (uploads/)
 │  ├─ logger.js            # pino
 │  ├─ routes/receipts.js   # REST routes + web view routes
 │  ├─ routes/tenants.js    # tenant-account REST (GET/POST /api/tenants)
@@ -323,6 +324,64 @@ scheme; change it there, nowhere else. Segments are `[A-Za-z0-9_-]{1,64}` (UUIDs
 
 Hermetic coverage: `test/{identity,tenants,multitenancy,queue}.test.js`; live
 coverage: the acceptance step above.
+
+## Persistence layer (pluggable record backend)
+
+Durable records go through a **pluggable persistence layer** (`src/persistence/`)
+chosen by `PERSISTENCE` — exactly like `OCR_PROVIDER` picks the OCR engine, NOT
+per-record. Backends implement a generic document interface (`get/put/delete/
+list`) over a key tuple `{ kind, tenant, user, id, sub }`; the four record stores
+(`store.js`, `receiptProfiles/{profileStore,resultStore}.js`,
+`products/productStore.js`) and the tenant registry call it instead of touching
+`fs` directly.
+
+- **`sqlite`** (the **default**) — one generic `docs` table in a SQLite file
+  (`SQLITE_PATH`, default `<DATA_DIR>/receipt-enricher.db`) via `better-sqlite3`.
+- **`filesystem`** — the original scope-partitioned JSON files under `DATA_DIR`;
+  byte-identical layout, so pre-existing data still reads.
+- **`postgresql`** — TODO; the selector throws a clear "not implemented" error.
+
+**Image blobs always stay on the filesystem** (`uploads/`) regardless of backend
+(`store.imagePathFor` unchanged); a blob-store abstraction (e.g. S3) is future work.
+
+**The tenant registry is durable.** `src/tenants.js` writes the provisioned-tenant
+list through the persistence layer *and* the Redis SET (`re:tenants`); at boot
+`tenants.hydrate()` (called in `server.js` and `worker.js`) repopulates the Redis
+SET from the durable list, so the tenant list survives a Redis recycle. Redis is
+still the runtime working copy the worker watches. `/health` reports
+`persistence: "<backend>"`.
+
+### `better-sqlite3` is a native module — two hard-won traps
+
+`better-sqlite3` ships prebuilt binaries on GitHub, fetched by `prebuild-install`
+at `npm install`. On this Node 20 + corporate-TLS setup, BOTH bite:
+
+1. **`better-sqlite3@12` dropped Node 20 prebuilts** (ships ABI v127+/Node 22+ only),
+   so on Node 20 (ABI **v115**) it falls back to a source compile. **Pinned to
+   `better-sqlite3@11.10.0`** — the last release with a Node-20 prebuilt for
+   darwin + linux(musl). Don't bump it without re-checking prebuilt availability.
+2. **Corporate TLS blocks the download from Node** (`prebuild-install` and node-gyp
+   fail with `unable to get local issuer certificate`). **`curl` is NOT blocked**,
+   so the prebuilts are vendored with curl into `.vendor/` (gitignored, fetched
+   per machine like `tessdata` — see `.vendor/README.md`). Local dev: `npm install
+   --ignore-scripts` then `tar -xzf .vendor/...darwin-arm64....tar.gz -C
+   node_modules/better-sqlite3/`. The container (`node:20-alpine` = **musl**)
+   build does the same with the `linuxmusl-<arch>` prebuilt (see `Dockerfile`). A
+   fresh worktree/clone lacks `.vendor/*.tar.gz` — re-fetch per `.vendor/README.md`
+   (same gotcha as the missing `tessdata` blobs).
+
+### Testing the persistence layer
+
+- **Hermetic:** `test/persistence.test.js` runs the backend contract against BOTH
+  `filesystem` + `sqlite`; the rest of `npm test` runs on the **default sqlite**,
+  and `test/persistence-stores.test.js` pins `filesystem` so both backends are
+  covered store-level in one run. Tenant durability (`hydrate()` after a simulated
+  Redis recycle) is covered too. `npm test` stays offline (sqlite → temp file).
+- **Acceptance:** `RE_TEST_PERSISTENCE` (default `sqlite`; `--sqlite` /
+  `--persistence fs` flags) + `test/acceptance/rest/96_persistence.sh` assert the
+  active backend, that the sqlite DB lands on the data volume, and that a record
+  **survives an api/worker restart**; `stack/10_container_contents.sh` verifies
+  the native module loads. Both backends pass 18/18.
 
 ## Receipt profiles & transformers (post-OCR cleanup)
 
