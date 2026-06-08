@@ -95,6 +95,54 @@ Find/clean every purpose stack by its label:
 podman ps -a --filter label=io.receipt-enricher.suite=feat
 ```
 
+## Building images from a git worktree (extra prep)
+
+A `git worktree` (e.g. for a feature branch under `.claude/worktrees/<name>/`) is
+a **partial, fresh checkout**: a few things the build needs are *not* in git and
+must be staged into the worktree before `up --build`, or the build succeeds but
+the containers misbehave at runtime. `cd` into the worktree's `receipt-enricher/`
+and run the prefixed-stack idiom from there — but first:
+
+1. **Offline Tesseract blobs (required for OCR).** `tessdata/*.traineddata` are
+   gitignored, so a fresh worktree's `tessdata/` has only `README.md`. The
+   Dockerfile's `COPY . .` would then bake an EMPTY tessdata into the image and
+   OCR fails at runtime with an opaque "tesseract worker error" (receipt goes
+   `failed`). Copy both blobs from a full checkout first:
+   ```bash
+   cp /Users/952657/Projects/claude-ocr-receipt/receipt-enricher/tessdata/{eng,osd}.traineddata \
+      ./tessdata/
+   ```
+   (The acceptance step `stack/10_container_contents.sh` asserts both are baked
+   into the api+worker images, so a run-all catches a miss fast.)
+
+2. **`.env` for the compose `env_file` (required for API keys).** Both `api` and
+   `worker` declare `env_file: .env`, read from the build-context dir at compose
+   time. A fresh worktree has no `.env` (it's gitignored), so the containers come
+   up with **no `ANTHROPIC_API_KEY`** — vision OCR and the product resolver then
+   silently degrade (Tesseract OCR; products all `skipped`). Copy it in:
+   ```bash
+   cp /Users/952657/Projects/claude-ocr-receipt/receipt-enricher/.env ./.env
+   ```
+   `.env` is also `.dockerignore`d, so it's never baked into the image — it's
+   injected at run time by compose. (For a deterministic cache-hit demo also add
+   `QUEUE_CONCURRENCY=1` so resolveProducts jobs run in enqueue order, ensuring a
+   re-upload's identical SKUs are populated before they're looked up again.)
+
+3. **`node_modules` — nothing to do (but know why).** A worktree has no
+   `node_modules` (or a dev symlink to the main checkout's, handy for host-side
+   `npm test`). It does **not** matter for the image: `node_modules/` is
+   `.dockerignore`d, so the symlink is never copied into the build context, and
+   the Dockerfile installs production deps fresh with `npm ci --omit=dev` inside
+   the image. So don't bother "moving" it — just don't rely on it being baked.
+
+With those staged, the normal prefixed-stack command builds cleanly from the
+worktree dir (use `--no-cache` for a guaranteed-clean image):
+```bash
+RECEIPT_PROJECT=feat-receipt-enricher RECEIPT_API_PORT=38080 RECEIPT_SUITE=feat \
+PUBLIC_BASE_URL=http://localhost:38080 OCR_PROVIDER=tesseract \
+  podman-compose -p feat-receipt-enricher up --build --no-cache -d
+```
+
 ## Gotchas (these bite specifically on prefixed stacks)
 
 - **`-p` must equal `RECEIPT_PROJECT`.** `-p` wins for the project name, but

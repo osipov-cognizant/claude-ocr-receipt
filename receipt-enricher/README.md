@@ -180,6 +180,17 @@ Point it at a remote host with `API_URL`:
 API_URL=http://my-server:8080 receipts upload receipt.jpg --wait
 ```
 
+A companion CLI, **`products`**, manages the product layer — notably the shared
+product cache (snapshot it to a file and restore it, e.g. to seed a known cache
+before an acceptance run so SKU lookups are served from cache, not live calls):
+
+```bash
+products cache export cache.json           # snapshot the cache to a file
+products cache import cache.json [--flush]  # restore it (--flush clears first)
+products cache stats                        # how many entries are cached
+products resolvers                          # list resolvers + the active one
+```
+
 ### Telegram bot
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.
@@ -278,6 +289,10 @@ All via `.env` (see `.env.example`). Highlights:
 | `PRODUCT_ANTHROPIC_MODEL` | `claude-haiku-4-5`  | model the anthropic resolver calls (set `claude-sonnet-4-6` if Haiku can't use web tools) |
 | `PRODUCT_ANTHROPIC_WEB_SEARCH` | `true`         | ground `productUrl` via Anthropic's server-side web search |
 | `PRODUCT_MAX_ITEMS`  | `100`                    | cap line items resolved per receipt (one backend call each) |
+| `PRODUCT_CONCURRENCY` | `5`                     | max per-item lookups run in parallel within one receipt |
+| `PRODUCT_CACHE_ENABLED` | `true`                | shared Redis cache in front of lookups (key: resolver+store+sku+description) |
+| `PRODUCT_CACHE_TTL_SECONDS` | `2592000`         | how long a cached product lookup lives (default 30 days) |
+| `PRODUCT_EVENTS_MAX` | `500`                    | size of the per-lookup event buffer behind `/products/monitor` (0 disables) |
 | `PRODUCT_RESOLVE_ON_UPLOAD` | `true`            | resolve products on upload whenever a profile is applied (opt out per-upload with `resolveProducts=0`) |
 | `TELEGRAM_BOT_TOKEN` | —                        | enables the bot service                      |
 

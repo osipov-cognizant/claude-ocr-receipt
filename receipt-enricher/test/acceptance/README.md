@@ -14,8 +14,9 @@ test/acceptance/
 ├─ lifecycle/
 │  ├─ 00_up.sh       # build + start the isolated test stack, wait until healthy
 │  └─ 99_down.sh     # tear down (removes volumes by default)
-├─ cli/              # driven through ./cli/receipts
+├─ cli/              # driven through ./cli/receipts and ./cli/products
 │  ├─ 10_health.sh  20_upload.sh  30_list.sh  40_view.sh
+│  └─ 50_productsCacheIo.sh   # `products` CLI cache export/import round-trip (offline)
 └─ rest/             # driven through raw curl
    ├─ 10_health.sh  20_upload.sh  30_list.sh  40_image.sh  50_view.sh  60_errors.sh
    ├─ 70_applyProfile.sh        # apply a profile to a processed receipt (sync)

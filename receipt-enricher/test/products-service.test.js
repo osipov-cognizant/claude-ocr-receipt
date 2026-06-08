@@ -7,9 +7,13 @@
 const { test, before } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { useTempDataDir } = require('./helpers/harness');
+const { useTempDataDir, installFakeRedis } = require('./helpers/harness');
 
 useTempDataDir('products-service-test');
+// resolveService now fronts each lookup with the shared Redis cache, so give it
+// an in-memory Redis (the cache starts empty, so these tests' resolve counts are
+// unchanged). Must precede requiring the service.
+installFakeRedis();
 
 // --- stub the resolver registry BEFORE requiring the service ---------------
 let behavior = (item) => ({

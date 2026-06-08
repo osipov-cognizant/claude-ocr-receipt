@@ -6,6 +6,8 @@ const store = require('../store');
 const profileStore = require('../receiptProfiles/profileStore');
 const profileResultStore = require('../receiptProfiles/resultStore');
 const productStore = require('../products/productStore');
+const productEvents = require('../products/productEvents');
+const productCache = require('../products/productCache');
 const registry = require('../products/registry');
 const { resolveProductsForProfileResult } = require('../products/resolveService');
 const { enqueueResolveProducts } = require('../queue');
@@ -18,10 +20,114 @@ function productsUrl(receiptId, profileId) {
   return `${config.publicBaseUrl}/api/receipts/${receiptId}/products/${profileId}`;
 }
 
+// Summarize a window of lookup events for the monitor header. `hitRate` is over
+// cache-eligible outcomes (hits + misses); avg/saved latency uses only misses,
+// since a hit's latency is the (negligible) cache read.
+function summarize(events) {
+  const s = { total: events.length, hits: 0, misses: 0, empty: 0, errors: 0 };
+  let missLatSum = 0;
+  let missLatN = 0;
+  for (const e of events) {
+    if (e.outcome === 'hit') s.hits += 1;
+    else if (e.outcome === 'miss') s.misses += 1;
+    else if (e.outcome === 'empty') s.empty += 1;
+    else if (e.outcome === 'error') s.errors += 1;
+    if (e.outcome === 'miss' && typeof e.latencyMs === 'number') {
+      missLatSum += e.latencyMs;
+      missLatN += 1;
+    }
+  }
+  const eligible = s.hits + s.misses;
+  s.hitRate = eligible ? s.hits / eligible : 0;
+  s.avgMissLatencyMs = missLatN ? Math.round(missLatSum / missLatN) : null;
+  // Rough wall-clock saved by the cache: each hit dodged ~one avg backend call.
+  s.estSavedMs = s.avgMissLatencyMs ? s.hits * s.avgMissLatencyMs : null;
+  return s;
+}
+
 // --- Available resolvers (read-only; code shipped with the app) --------------
 
 router.get('/api/productResolvers', (req, res) => {
   res.json({ active: config.products.resolver, resolvers: registry.list() });
+});
+
+// --- Live lookup monitor (technical console) ---------------------------------
+
+// JSON feed for /products/monitor: recent per-lookup events (newest first) plus
+// a summary over the returned window. Polled by the monitor page every few sec.
+router.get('/api/products/events', async (req, res, next) => {
+  try {
+    const max = config.products.eventsMax;
+    const limit = Math.min(parseInt(req.query.limit, 10) || max, max);
+    const events = await productEvents.recent({ limit });
+    res.json({ events, stats: summarize(events), serverTime: new Date().toISOString() });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// HTML monitor console: auto-refreshing (default 5s), autoscrolling tail of
+// product lookups that makes cache HITs visually obvious. Built for a technical
+// operator (us), not an end user — depth over polish. ?interval=<sec> overrides
+// (a trailing 's' is tolerated, e.g. ?interval=3s — parseInt stops at it).
+function serveMonitor(req, res) {
+  const secs = parseInt(req.query.interval, 10);
+  const intervalMs = Math.max(1000, (Number.isFinite(secs) ? secs : 5) * 1000);
+  res.type('html').send(
+    view.renderProductMonitor({ intervalMs, eventsUrl: '/api/products/events', limit: config.products.eventsMax })
+  );
+}
+router.get('/products/monitor', serveMonitor);
+// Alias under a stable, namespaced observability path. Same page, same query
+// params — purely an alternate URL for /products/monitor.
+router.get('/observe/cache/products', serveMonitor);
+
+// --- Products cache: export / import (admin) ---------------------------------
+// The product cache is shared Redis state. These endpoints snapshot it to a
+// portable JSON document and restore it — e.g. seed a known cache before an
+// acceptance run so SKU lookups are served from cache instead of live Anthropic
+// calls (a parallel, offline path to the resolver). The `products` CLI wraps
+// these. The monitor's event log (products:events*) is never included.
+
+router.get('/api/products/cache/stats', async (req, res, next) => {
+  try {
+    res.json({ resolver: config.products.resolver, entries: await productCache.count() });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/api/products/cache/export', async (req, res, next) => {
+  try {
+    const entries = await productCache.exportEntries();
+    res.json({
+      type: 'receipt-enricher/products-cache',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      resolver: config.products.resolver,
+      count: entries.length,
+      entries,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Accepts a full export document ({type,version,entries}) or a bare entries
+// array. ?flush=1 clears the existing cache first.
+router.post('/api/products/cache/import', async (req, res, next) => {
+  try {
+    const b = req.body;
+    const entries = Array.isArray(b) ? b : b && Array.isArray(b.entries) ? b.entries : null;
+    if (!entries) {
+      return res.status(400).json({ error: 'body must be a products-cache export object or an array of entries' });
+    }
+    const result = await productCache.importEntries(entries, { flush: !!req.query.flush });
+    logger.info({ ...result, total: entries.length }, 'product cache imported');
+    res.json({ ...result, total: entries.length });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // --- Resolve products from a receipt's profile result ------------------------

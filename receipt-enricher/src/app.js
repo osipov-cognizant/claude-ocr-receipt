@@ -17,7 +17,9 @@ const { cache } = require('./redis');
 function createApp() {
   const app = express();
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '1mb' }));
+  // 16mb so a product-cache import (POST /api/products/cache/import) of a large
+  // exported cache fits; ordinary JSON bodies (applyProfile, etc.) are tiny.
+  app.use(express.json({ limit: '16mb' }));
 
   // Health check (used by Docker/Podman healthcheck and the CLI).
   app.get('/health', async (req, res) => {

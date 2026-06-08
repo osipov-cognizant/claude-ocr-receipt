@@ -72,7 +72,13 @@ queued  ──►  processing  ──►  done
 | `GET`  | `/api/receipts/:id/products/:profileId` | Products for one source profile (id or name) | JSON |
 | `GET`  | `/receipts/:id/products/:profileId/view` | HTML view of resolved products | HTML |
 | `GET`  | `/api/products` | List **all** product results across every receipt | JSON array |
+| `GET`  | `/api/products/events` | Recent per-lookup events (cache hit/miss/empty/error) + summary stats (`?limit=`) | JSON |
+| `GET`  | `/api/products/cache/stats` | Count of entries in the shared product cache | JSON |
+| `GET`  | `/api/products/cache/export` | Export the product cache as a portable JSON document | JSON |
+| `POST` | `/api/products/cache/import` | Import a cache export (or bare entries array); `?flush=1` clears first | JSON |
 | `GET`  | `/products` | HTML list of all product results | HTML |
+| `GET`  | `/products/monitor` | Live, auto-refreshing technical console for lookups & cache hits (`?interval=<sec>`) | HTML |
+| `GET`  | `/observe/cache/products` | Alias for `/products/monitor` (same page; `?interval=<sec>`, trailing `s` ok) | HTML |
 
 The profile endpoints are documented in **[Receipt Profiles](#receipt-profiles)** below;
 the product endpoints in **[Products](#products)**.
@@ -457,7 +463,7 @@ curl -fsS -X POST "$BASE/api/receipts/$ID/profileResults/usGrocery1/resolveProdu
       "error": null
     }
   ],
-  "stats": { "resolved": 1, "skipped": 0, "errors": 0 }
+  "stats": { "resolved": 1, "skipped": 0, "cached": 0, "errors": 0 }
 }
 ```
 
@@ -465,6 +471,14 @@ Errors: `404` (unknown receipt/profile), `409` (the profile has not been applied
 to this receipt yet — apply it first). When products are disabled or the resolver
 isn't configured (no API key), resolution degrades gracefully: items list with
 null product fields and `stats.skipped`.
+
+Per-item lookups run in a bounded parallel pool (`PRODUCT_CONCURRENCY`) and are
+fronted by a shared, Redis-backed cache keyed by resolver + store + sku +
+description (`PRODUCT_CACHE_ENABLED`, `PRODUCT_CACHE_TTL_SECONDS`). The cache is
+shared across all worker/server processes, so a product seen on an earlier
+receipt (or in another session) is served without a backend call. `stats.cached`
+is a sub-count of `stats.resolved` reporting how many came from the cache
+(`resolved + skipped + errors` still equals the item count).
 
 ### Read products
 
@@ -480,8 +494,53 @@ open  "$BASE/products"                                      # HTML list of all p
 > the profile view, the HTML product view renders only a **stored** result (it
 > won't resolve fresh on a miss, since resolution makes live backend calls).
 > Configure with `PRODUCT_RESOLVER`, `PRODUCT_ANTHROPIC_MODEL`,
-> `PRODUCT_ANTHROPIC_WEB_SEARCH`, `PRODUCT_MAX_ITEMS`, `PRODUCT_RESOLVE_ON_UPLOAD`,
+> `PRODUCT_ANTHROPIC_WEB_SEARCH`, `PRODUCT_MAX_ITEMS`, `PRODUCT_CONCURRENCY`,
+> `PRODUCT_CACHE_ENABLED`, `PRODUCT_CACHE_TTL_SECONDS`, `PRODUCT_RESOLVE_ON_UPLOAD`,
 > `PRODUCTS_ENABLED` (see the README Configuration reference).
+
+### Live lookup monitor
+
+`GET /products/monitor` is a self-contained, dark technical console that tails
+product lookups in near real time. It polls `GET /api/products/events` on an
+interval (`?interval=<sec>`, default 5) and streams each lookup as a row,
+autoscrolling like a log tail. **Cache hits are made obvious**: a green-tinted
+row, a `⚡ CACHE HIT` badge, a sub-millisecond latency cell, and a live
+**hit-rate** / **backend-calls-avoided** readout in the header.
+
+```bash
+open "$BASE/products/monitor"            # the console
+curl -fsS "$BASE/api/products/events?limit=50" | jq '.stats'
+# { "total": 12, "hits": 7, "misses": 5, "empty": 0, "errors": 0,
+#   "hitRate": 0.58, "avgMissLatencyMs": 840, "estSavedMs": 5880 }
+```
+
+Each event is `{ seq, ts, outcome: "hit"|"miss"|"empty"|"error", latencyMs,
+store, sku, description, productTitle, confidence, cacheKey, receiptId, model,
+dryRun }`. The feed is a Redis-backed ring buffer (`PRODUCT_EVENTS_MAX` entries,
+default 500) shared across worker/server processes — so the worker's resolutions
+show up on the server-rendered page. Set `PRODUCT_EVENTS_MAX=0` to disable
+instrumentation.
+
+### Products cache (export / import)
+
+The per-SKU product cache is shared Redis state. These endpoints snapshot it to
+a portable JSON document and restore it — useful to **seed a known cache before
+an acceptance run** so SKU lookups are served from cache instead of live
+Anthropic calls (a parallel, offline path to the resolver). The monitor's event
+log is never included. Driven by the **`products` CLI** (`cli/products`):
+
+```bash
+products cache export cache.json          # GET  /api/products/cache/export -> file
+products cache import cache.json [--flush] # POST /api/products/cache/import (?flush=1)
+products cache stats                       # GET  /api/products/cache/stats
+```
+
+The export document is `{ type: "receipt-enricher/products-cache", version: 1,
+exportedAt, resolver, count, entries: [ { key, value, ttlSeconds } ] }`. Import
+accepts that document **or** a bare `entries` array; entries whose key isn't a
+`products:` cache key (and the reserved `products:events*` keys) are skipped, and
+a missing `ttlSeconds` falls back to `PRODUCT_CACHE_TTL_SECONDS`. Response:
+`{ imported, skipped, flushed, total }`.
 
 ---
 

@@ -37,7 +37,7 @@ function useTempDataDir(label = 'receipt-test') {
  */
 function installFakeRedis() {
   const store = new Map();
-  const calls = { get: 0, set: 0, ping: 0 };
+  const calls = { get: 0, set: 0, ping: 0, lpush: 0, lrange: 0, ltrim: 0, incr: 0, del: 0, scan: 0, ttl: 0 };
   const client = {
     async get(key) {
       calls.get += 1;
@@ -51,6 +51,56 @@ function installFakeRedis() {
     async ping() {
       calls.ping += 1;
       return 'PONG';
+    },
+    // --- minimal list + counter ops (used by productEvents) ---
+    async lpush(key, ...values) {
+      calls.lpush += 1;
+      const arr = store.get(key) || [];
+      arr.unshift(...values); // newest at index 0, like Redis LPUSH
+      store.set(key, arr);
+      return arr.length;
+    },
+    async lrange(key, start, stop) {
+      calls.lrange += 1;
+      const arr = store.get(key) || [];
+      const end = stop === -1 ? arr.length : stop + 1;
+      return arr.slice(start, end);
+    },
+    async ltrim(key, start, stop) {
+      calls.ltrim += 1;
+      const arr = store.get(key) || [];
+      const end = stop === -1 ? arr.length : stop + 1;
+      store.set(key, arr.slice(start, end));
+      return 'OK';
+    },
+    async incr(key) {
+      calls.incr += 1;
+      const n = (parseInt(store.get(key), 10) || 0) + 1;
+      store.set(key, String(n));
+      return n;
+    },
+    async del(key) {
+      calls.del += 1;
+      const had = store.delete(key);
+      return had ? 1 : 0;
+    },
+    // Single-pass SCAN: ignores the cursor and returns all matching keys with a
+    // terminal '0' cursor. Honors a MATCH glob (only '*' is supported, which is
+    // all the app uses). Enough for productCache export/import tests.
+    async scan(cursor, ...args) {
+      calls.scan += 1;
+      let match = '*';
+      for (let i = 0; i < args.length; i += 1) {
+        if (String(args[i]).toUpperCase() === 'MATCH') match = String(args[i + 1]);
+      }
+      const re = new RegExp('^' + match.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
+      const keys = [...store.keys()].filter((k) => re.test(k));
+      return ['0', keys];
+    },
+    // No TTL tracking in the fake; report -1 (exists, no expiry) / -2 (missing).
+    async ttl(key) {
+      calls.ttl += 1;
+      return store.has(key) ? -1 : -2;
     },
   };
 

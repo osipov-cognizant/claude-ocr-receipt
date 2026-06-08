@@ -242,7 +242,7 @@ function renderProductResult(record, result) {
       <span class="lead">Products resolved:</span> via <span class="pill">${esc(result.resolver || '')}</span>
       ${result.model ? `<span class="pill">${esc(result.model)}</span>` : ''}
       · from profile ${esc(result.receiptProfileName || result.receiptProfileId)}
-      · ${esc(s.resolved || 0)} resolved, ${esc(s.skipped || 0)} skipped, ${esc(s.errors || 0)} error${s.errors === 1 ? '' : 's'}
+      · ${esc(s.resolved || 0)} resolved${s.cached ? ` (${esc(s.cached)} from cache)` : ''}, ${esc(s.skipped || 0)} skipped, ${esc(s.errors || 0)} error${s.errors === 1 ? '' : 's'}
     </div>
     <h2 class="store" style="margin-top:14px">${esc(result.store?.name || 'Unknown store')}</h2>
     <div class="meta">${esc(result.store?.date || '')} · id ${esc(record.id)} · via ${esc(record.source)}</div>
@@ -270,7 +270,7 @@ function renderProductList(results) {
         .join('')
     : `<p class="empty-note">No products resolved yet. Resolve a receipt's profile result to see it here.</p>`;
   return HEAD + `
-  <p><a href="/">← all receipts</a> · <a href="/profileResults">profile results</a></p>
+  <p><a href="/">← all receipts</a> · <a href="/profileResults">profile results</a> · <a href="/products/monitor">live lookup monitor →</a></p>
   <hr class="rule">
   <div class="list">${rows}</div>
   ` + FOOT;
@@ -330,6 +330,216 @@ function renderProfileResultList(results, opts = {}) {
   ` + FOOT;
 }
 
+// Live product-lookup monitor — a deliberately TECHNICAL console (dark, dense,
+// monospace), not part of the paper-ticket UI. It renders an empty shell + a
+// client poller; all rows are drawn client-side from GET /api/products/events.
+// Cache HITs are made unmistakable: green row tint, a "⚡ CACHE HIT" badge, a
+// near-zero latency cell, and a live hit-rate / backend-calls-avoided readout.
+//
+// NOTE on escaping: this returns a template literal, so the embedded client
+// script is written with plain string concatenation (single quotes, no nested
+// template literals / `${}`) to avoid colliding with the server-side
+// interpolation. The ONLY server interpolation is the injected config blob.
+function renderProductMonitor(opts = {}) {
+  const cfg = {
+    intervalMs: opts.intervalMs || 5000,
+    eventsUrl: opts.eventsUrl || '/api/products/events',
+    limit: opts.limit || 500,
+  };
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>product lookup monitor</title>
+<style>
+:root{
+  --bg:#0b0f14; --panel:#111824; --panel-2:#0e151f; --line:#1f2b3a; --ink:#cdd9e5;
+  --muted:#6b7c90; --hit:#2ee6a6; --hit-bg:rgba(46,230,166,.10); --miss:#ffb454;
+  --empty:#7a8aa0; --err:#ff5c6c; --accent:#5ab0ff;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:13px/1.45 "SFMono-Regular",ui-monospace,Menlo,Consolas,monospace;}
+header{padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel-2);
+  display:flex;align-items:center;gap:18px;flex-wrap:wrap;position:sticky;top:0;z-index:2}
+h1{font-size:14px;margin:0;letter-spacing:.5px;color:var(--ink);font-weight:600}
+h1 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--err);
+  margin-right:8px;vertical-align:middle;transition:background .3s}
+h1 .dot.live{background:var(--hit);box-shadow:0 0 8px var(--hit)}
+.cards{display:flex;gap:10px;flex-wrap:wrap;margin-left:auto}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 12px;min-width:88px}
+.card .k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:1px}
+.card .v{font-size:18px;font-weight:700;margin-top:2px}
+.card.rate .v{color:var(--hit)} .card.saved .v{color:var(--accent)} .card.err .v{color:var(--err)}
+.card.flash{animation:flash .6s ease-out}
+@keyframes flash{0%{background:var(--hit-bg);border-color:var(--hit)}100%{background:var(--panel)}}
+.controls{display:flex;gap:8px;align-items:center}
+button{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px;
+  padding:6px 10px;font:inherit;cursor:pointer}
+button:hover{border-color:var(--accent)}
+.sub{color:var(--muted);font-size:11px}
+#log{height:calc(100vh - 60px);overflow:auto}
+table{width:100%;border-collapse:collapse}
+thead th{position:sticky;top:0;background:var(--panel-2);color:var(--muted);text-align:left;
+  font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:1px;
+  padding:8px 10px;border-bottom:1px solid var(--line);z-index:1}
+tbody td{padding:6px 10px;border-bottom:1px solid rgba(31,43,58,.5);vertical-align:top;white-space:nowrap}
+tbody td.desc,tbody td.title{white-space:normal;max-width:280px}
+tr.hit{background:var(--hit-bg);box-shadow:inset 3px 0 0 var(--hit)}
+tr.miss{box-shadow:inset 3px 0 0 var(--miss)}
+tr.empty{box-shadow:inset 3px 0 0 var(--empty)}
+tr.error{box-shadow:inset 3px 0 0 var(--err)}
+.badge{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.5px;
+  padding:2px 7px;border-radius:999px;border:1px solid currentColor}
+.badge.hit{color:var(--hit)} .badge.miss{color:var(--miss)}
+.badge.empty{color:var(--empty)} .badge.error{color:var(--err)}
+.lat.hit{color:var(--hit);font-weight:700} .lat.slow{color:var(--miss)}
+.mono{color:var(--muted)} .key{cursor:help}
+.title{color:var(--ink)} .conf{color:var(--accent)}
+.t{color:var(--muted)}
+.empty-row td{color:var(--muted);text-align:center;padding:40px}
+</style>
+</head><body>
+<header>
+  <h1><span class="dot" id="live"></span>product&nbsp;lookup&nbsp;monitor</h1>
+  <div class="controls">
+    <button id="pause">⏸ Pause</button>
+    <button id="clearview">clear view</button>
+    <span class="sub">every <b id="ivl"></b>s · updated <b id="updated">—</b></span>
+  </div>
+  <div class="cards">
+    <div class="card"><div class="k">lookups</div><div class="v" id="m-total">0</div></div>
+    <div class="card rate" id="card-rate"><div class="k">hit rate</div><div class="v" id="m-rate">—</div></div>
+    <div class="card"><div class="k">hits / miss</div><div class="v"><span id="m-hits" style="color:var(--hit)">0</span> / <span id="m-miss" style="color:var(--miss)">0</span></div></div>
+    <div class="card saved"><div class="k">backend avoided</div><div class="v"><span id="m-saved">0</span></div></div>
+    <div class="card err"><div class="k">empty / err</div><div class="v"><span id="m-empty">0</span> / <span id="m-err">0</span></div></div>
+  </div>
+</header>
+<div id="log">
+  <table>
+    <thead><tr>
+      <th>time</th><th>outcome</th><th>latency</th><th>store</th><th>sku</th>
+      <th>description</th><th>product</th><th>conf</th><th>cache key</th><th>receipt</th>
+    </tr></thead>
+    <tbody id="rows"><tr class="empty-row"><td colspan="10">waiting for lookups… resolve a receipt's products to see events stream in.</td></tr></tbody>
+  </table>
+</div>
+<script>
+window.__MONITOR__ = ${JSON.stringify(cfg)};
+(function(){
+  var CFG = window.__MONITOR__;
+  var MAX_ROWS = 4000;
+  var seen = new Set();
+  var paused = false;
+  var firstBatch = true;
+  var stats = { total:0, hits:0, miss:0, empty:0, err:0, missLatSum:0, missLatN:0 };
+  var rowsEl = document.getElementById('rows');
+  var scroller = document.getElementById('log');
+  document.getElementById('ivl').textContent = Math.round(CFG.intervalMs/1000);
+
+  function esc(s){ var d=document.createElement('div'); d.textContent = (s==null?'':String(s)); return d.innerHTML; }
+  function pad(n){ return (n<10?'00':n<100?'0':'') + n; }
+  function fmtTime(ts){ var d=new Date(ts); if(isNaN(d)) return '';
+    return d.toLocaleTimeString('en-GB',{hour12:false}) + '.' + pad(d.getMilliseconds()); }
+  function shortKey(k){ if(!k) return ''; var p=String(k).split(':'); return p[p.length-1].slice(0,12); }
+  function setLive(on){ document.getElementById('live').className = 'dot' + (on?' live':''); }
+
+  function latencyHtml(e){
+    if(e.outcome==='hit') return '<span class="lat hit">' + (e.latencyMs!=null?e.latencyMs:0) + ' ms ⚡</span>';
+    if(e.latencyMs==null) return '<span class="mono">—</span>';
+    var slow = e.latencyMs >= 250 ? ' slow' : '';
+    return '<span class="lat' + slow + '">' + e.latencyMs + ' ms</span>';
+  }
+  function badgeHtml(o){
+    var label = o==='hit' ? '⚡ CACHE HIT' : o==='miss' ? 'MISS → backend' : o==='empty' ? 'no product' : 'ERROR';
+    return '<span class="badge ' + o + '">' + label + '</span>';
+  }
+  function rowHtml(e){
+    var conf = (e.confidence!=null) ? Number(e.confidence).toFixed(2) : '';
+    return '<tr class="' + (e.outcome||'') + '">'
+      + '<td class="t">' + esc(fmtTime(e.ts)) + '</td>'
+      + '<td>' + badgeHtml(e.outcome) + '</td>'
+      + '<td>' + latencyHtml(e) + '</td>'
+      + '<td>' + esc(e.store||'—') + '</td>'
+      + '<td class="mono">' + esc(e.sku||'—') + '</td>'
+      + '<td class="desc">' + esc(e.description||'') + (e.dryRun?' <span class="mono">[dryRun]</span>':'') + '</td>'
+      + '<td class="title">' + esc(e.productTitle||(e.outcome==='error'?('⚠ '+(e.error||'error')):'')) + '</td>'
+      + '<td class="conf">' + conf + '</td>'
+      + '<td class="mono key" title="' + esc(e.cacheKey||'') + '">' + esc(shortKey(e.cacheKey)) + '</td>'
+      + '<td class="mono">' + esc(String(e.receiptId||'').slice(0,8)) + '</td>'
+      + '</tr>';
+  }
+
+  function accrue(e){
+    stats.total++;
+    if(e.outcome==='hit') stats.hits++;
+    else if(e.outcome==='miss'){ stats.miss++; if(typeof e.latencyMs==='number'){ stats.missLatSum+=e.latencyMs; stats.missLatN++; } }
+    else if(e.outcome==='empty') stats.empty++;
+    else if(e.outcome==='error') stats.err++;
+  }
+  function renderStats(){
+    var eligible = stats.hits + stats.miss;
+    var rate = eligible ? Math.round(100*stats.hits/eligible) : null;
+    var avgMiss = stats.missLatN ? Math.round(stats.missLatSum/stats.missLatN) : 0;
+    var savedMs = stats.hits * avgMiss;
+    document.getElementById('m-total').textContent = stats.total;
+    document.getElementById('m-rate').textContent = rate==null ? '—' : (rate + '%');
+    document.getElementById('m-hits').textContent = stats.hits;
+    document.getElementById('m-miss').textContent = stats.miss;
+    document.getElementById('m-empty').textContent = stats.empty;
+    document.getElementById('m-err').textContent = stats.err;
+    document.getElementById('m-saved').textContent = stats.hits + ' calls' + (savedMs? ' / ~'+(savedMs>=1000?(savedMs/1000).toFixed(1)+'s':savedMs+'ms') : '');
+  }
+  function flashRate(){ var c=document.getElementById('card-rate'); c.classList.remove('flash'); void c.offsetWidth; c.classList.add('flash'); }
+
+  function atBottom(){ return (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) < 60; }
+  function trimRows(){ while(rowsEl.children.length > MAX_ROWS){ rowsEl.removeChild(rowsEl.firstChild); } }
+
+  function poll(){
+    if(paused) return;
+    fetch(CFG.eventsUrl + '?limit=' + CFG.limit, {headers:{'accept':'application/json'}})
+      .then(function(r){ if(!r.ok) throw new Error('http '+r.status); return r.json(); })
+      .then(function(data){
+        setLive(true);
+        document.getElementById('updated').textContent = new Date().toLocaleTimeString('en-GB',{hour12:false});
+        var evs = (data.events||[]).slice().reverse(); // server: newest-first -> we append oldest-first
+        var stick = atBottom();
+        var added = 0, addedHit = false, html = '';
+        evs.forEach(function(e){
+          var id = (e.seq!=null) ? ('s'+e.seq) : (e.ts+'|'+e.cacheKey+'|'+e.outcome+'|'+e.description);
+          if(seen.has(id)) return;
+          seen.add(id); accrue(e); html += rowHtml(e); added++;
+          if(e.outcome==='hit') addedHit = true;
+        });
+        if(added){
+          if(firstBatch){ rowsEl.innerHTML=''; firstBatch=false; }
+          rowsEl.insertAdjacentHTML('beforeend', html);
+          trimRows(); renderStats();
+          if(addedHit) flashRate();
+          if(stick) scroller.scrollTop = scroller.scrollHeight;
+        }
+      })
+      .catch(function(){ setLive(false); });
+  }
+
+  document.getElementById('pause').addEventListener('click', function(){
+    paused = !paused; this.textContent = paused ? '▶ Resume' : '⏸ Pause';
+    if(!paused) poll();
+  });
+  document.getElementById('clearview').addEventListener('click', function(){
+    rowsEl.innerHTML = '<tr class="empty-row"><td colspan="10">view cleared. (server buffer is unchanged; new events will reappear)</td></tr>';
+    seen.clear(); firstBatch = true;
+    stats = { total:0, hits:0, miss:0, empty:0, err:0, missLatSum:0, missLatN:0 }; renderStats();
+  });
+
+  poll();
+  setInterval(poll, CFG.intervalMs);
+})();
+</script>
+</body></html>`;
+}
+
 module.exports = {
   renderReceipt,
   renderProfileResult,
@@ -337,5 +547,6 @@ module.exports = {
   renderProfileResultList,
   renderProductResult,
   renderProductList,
+  renderProductMonitor,
   esc,
 };

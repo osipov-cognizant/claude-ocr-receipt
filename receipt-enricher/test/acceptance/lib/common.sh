@@ -17,7 +17,9 @@ RE_TEST_PROJECT="${RE_TEST_PROJECT:-test-receipt-enricher}" # compose project (i
 RE_TEST_API_PORT="${RE_TEST_API_PORT:-18080}"              # host port (coexist with prod 8080)
 RE_TEST_BASE="${RE_TEST_BASE:-http://localhost:${RE_TEST_API_PORT}}"
 RE_TEST_OCR="${RE_TEST_OCR:-tesseract}"                    # tesseract (offline) | vision (anthropic)
-RE_TEST_SAMPLE="${RE_TEST_SAMPLE:-$REPO_DIR/samples/costco/rotated_PXL_20260526_235419811.jpg}"
+# OCR now auto-corrects orientation, so the old upright `rotated_*` copies were
+# removed — point at the as-shot sample (any orientation works).
+RE_TEST_SAMPLE="${RE_TEST_SAMPLE:-$REPO_DIR/samples/costco/PXL_20260526_235419811.jpg}"
 RE_TEST_KEEP_VOLUMES="${RE_TEST_KEEP_VOLUMES:-0}"          # 1 = keep volumes on teardown
 RE_TEST_NO_TEARDOWN="${RE_TEST_NO_TEARDOWN:-0}"            # 1 = leave stack up after run-all
 RE_TEST_POLL_TIMEOUT="${RE_TEST_POLL_TIMEOUT:-240}"        # seconds to wait for done/health
@@ -94,6 +96,9 @@ require_stack() {
 
 # Path to the CLI wrapper, pre-pointed at the test stack. Usage: "$(cli)" health
 cli() { printf '%s' "$PROJECT_DIR/cli/receipts"; }
+
+# Path to the products CLI. Usage: API_URL="$RE_TEST_BASE" "$(products_cli)" cache stats
+products_cli() { printf '%s' "$PROJECT_DIR/cli/products"; }
 
 # Render a receipt's JSON (read from stdin) as pretty-printed text. Used instead
 # of opening a browser. Prints nothing if the input isn't a valid receipt.

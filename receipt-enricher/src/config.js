@@ -126,6 +126,21 @@ const config = {
     resultsDir: path.join(dataDir, 'products'),
     // Cap on line items resolved per receipt (each item is one backend call).
     maxItems: int(process.env.PRODUCT_MAX_ITEMS, 100),
+    // Max line-item lookups to run concurrently within one receipt. Each lookup
+    // is an independent, network-bound backend call, so resolving them in a
+    // bounded pool (instead of one-at-a-time) cuts wall-clock time roughly by
+    // this factor. Keep it modest to stay under backend rate limits.
+    concurrency: int(process.env.PRODUCT_CONCURRENCY, 5),
+    // Shared, Redis-backed cache in front of the per-item resolver lookups
+    // (src/products/productCache.js). Keyed by resolver + store + sku +
+    // description, so the same product recurring across receipts/sessions skips
+    // the backend call. Shared across all worker/server processes.
+    cacheEnabled: bool(process.env.PRODUCT_CACHE_ENABLED, true),
+    // Product identity is stable, so cache entries can live a while (30 days).
+    cacheTtlSeconds: int(process.env.PRODUCT_CACHE_TTL_SECONDS, 60 * 60 * 24 * 30),
+    // Size of the per-lookup event ring buffer feeding /products/monitor
+    // (src/products/productEvents.js). 0 disables instrumentation entirely.
+    eventsMax: int(process.env.PRODUCT_EVENTS_MAX, 500),
     // Resolve products by default whenever an upload applies a receipt profile
     // (opt out per-upload with resolveProducts=0). Products require a profile,
     // so an upload with no profile (and no DEFAULT_PROFILE_ID) still won't resolve.
