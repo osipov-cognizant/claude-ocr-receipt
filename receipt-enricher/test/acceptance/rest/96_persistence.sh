@@ -17,9 +17,17 @@ backend="$(curl -fsS "$RE_TEST_BASE/health" | jq -r '.persistence')"
 assert_eq "active backend" "$RE_TEST_PERSISTENCE" "$backend"
 
 # 2) The backend wrote where we expect on the data volume — concrete proof the
-#    switch took effect, inspected inside the api container.
+#    switch took effect, inspected inside the api container. A processed receipt
+#    must exist first (so the DB/dir is created), and `compose exec` can return a
+#    transient empty result, so seed + retry before asserting.
+ensure_receipt >/dev/null
 DB_PATH="${SQLITE_PATH:-/app/data/receipt-enricher.db}"
-db_present="$(in_container api "[ -e '$DB_PATH' ] && echo yes || echo no" | tr -dc 'a-z')"
+db_present=""
+for _ in 1 2 3; do
+  db_present="$(in_container api "test -e '$DB_PATH' && echo yes || echo no" 2>/dev/null | tr -dc 'a-z')"
+  [ -n "$db_present" ] && break
+  sleep 1
+done
 if [ "$RE_TEST_PERSISTENCE" = "sqlite" ]; then
   assert_eq "sqlite db file present on volume" "yes" "$db_present"
 else
