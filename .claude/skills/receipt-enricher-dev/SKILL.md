@@ -11,8 +11,10 @@ description: >-
   in src/parse); the OCR providers in src/ocr; receipt profiles & transformers
   (src/receiptProfiles — applying/seeding usGrocery1 or tesseractGroceryUs1,
   `--profile`/profileId uploads, an "unknown profile" 400, or pinning the OCR
-  engine via OCR_PROVIDER); Tavily enrichment; the CLI or web
-  views; running the hermetic, live, or bash/curl acceptance tests (e.g.
+  engine via OCR_PROVIDER); multi-tenancy (tenant/user composite ids
+  `<tenant>:<user>:<cacheId>`, per-tenant queues, tenant accounts, identity
+  headers/defaults — src/identity.js & src/tenants.js); Tavily enrichment; the
+  CLI or web views; running the hermetic, live, or bash/curl acceptance tests (e.g.
   `npm run test:live:vision` skipping, Tesseract producing garbage, or
   `test/acceptance/run-all.sh`); standing up or tearing down the containerized
   stack with podman-compose (or docker compose); processing a receipt or viewing
@@ -48,10 +50,13 @@ receipt-enricher/
 │  ├─ worker.js            # BullMQ worker that runs the pipeline
 │  ├─ bot.js               # Telegram bot (optional; relays to the REST API)
 │  ├─ config.js            # all env-driven config (READ THIS to understand modes)
-│  ├─ queue.js  redis.js   # BullMQ queue + ioredis connections
-│  ├─ store.js             # durable receipt records (JSON files + image on disk)
+│  ├─ identity.js          # MULTI-TENANCY: composite-id scheme + scoped path/key + jobId helpers
+│  ├─ tenants.js           # Redis-backed tenant registry (accounts; the worker watches it)
+│  ├─ queue.js  redis.js   # PER-TENANT BullMQ queues (receipts-<tenant>) + ioredis connections
+│  ├─ store.js             # durable receipt records, scoped <dataDir>/<tenant>/<user>/...
 │  ├─ logger.js            # pino
 │  ├─ routes/receipts.js   # REST routes + web view routes
+│  ├─ routes/tenants.js    # tenant-account REST (GET/POST /api/tenants)
 │  ├─ pipeline/index.js    # processReceipt(): orchestrates the 4 stages
 │  ├─ ocr/  index.js vision.js tesseract.js   # extraction providers
 │  ├─ parse/receiptParser.js     # normalizeStructured() + parseText() heuristics
@@ -61,7 +66,7 @@ receipt-enricher/
 │  │  ├─ resolvers/        # backend adapters: anthropic.js (+ types.js); tavily later
 │  │  ├─ registry.js       # loads resolvers; active one = config.products.resolver
 │  │  ├─ resolveService.js # runs the resolver over a profile result's items (parallel pool + cache)
-│  │  ├─ productStore.js   # durable product results (data/products/<receiptId>/)
+│  │  ├─ productStore.js   # durable product results (data/<tenant>/<user>/products/<cacheId>/)
 │  │  ├─ productCache.js   # shared Redis cache in front of per-SKU lookups (+ export/import)
 │  │  └─ productEvents.js  # Redis ring buffer of per-lookup events (feeds /products/monitor)
 │  ├─ routes/products.js   # product REST + web views + live monitor + cache export/import
@@ -76,7 +81,7 @@ receipt-enricher/
 │  ├─ fixtures/ helpers/   # costco sample fixtures + harness (fetch/redis stubs)
 ├─ tessdata/               # offline Tesseract eng.traineddata (see its README)
 ├─ docs/API.md             # full HTTP API reference + curl walkthrough
-├─ data/                   # durable records (data/receipts/*.json, data/uploads/*)
+├─ data/                   # durable records, scoped per identity: data/<tenant>/<user>/{receipts,uploads,profileResults,products}/ (+ data/<tenant>/receiptProfiles/)
 ├─ docker-compose.yml      # PARAMETERIZED (project/port/OCR/label/base-url) — see Podman
 ├─ Dockerfile  Containerfile  .env.example
 └─ README.md
@@ -107,7 +112,7 @@ to Tesseract regardless of how it was shot.
 ```bash
 cd /Users/952657/Projects/claude-ocr-receipt/receipt-enricher
 npm install          # one-time
-npm test             # ~76 hermetic tests — no network, no Redis, no API keys
+npm test             # ~240 hermetic tests — no network, no Redis, no API keys
 ```
 
 The hermetic suite must always pass and stay self-contained (it stubs `fetch`
@@ -267,6 +272,57 @@ preprocessing — it is the recommended path. Tesseract is a best-effort offline
 fallback: it needs an upright, sharp image and produces noisy descriptions and
 the occasional digit slip. The bigger/“best” Tesseract model is not meaningfully
 better here — image quality is the bottleneck, not the model.
+
+## Multi-tenancy (identity, scoping, per-tenant queues)
+
+Every resource is owned by an identity — a **(tenantId, userId)** pair — and a
+resource's public id is the **composite id** `"<tenant>:<user>:<cacheId>"`
+(e.g. `main:main:1b70d95bbd9f462f`). `src/identity.js` is the single home for the
+scheme; change it there, nowhere else. Segments are `[A-Za-z0-9_-]{1,64}` (UUIDs,
+`main`, …) and deliberately exclude `:` and `/`.
+
+- **The composite id IS the `receiptId` everywhere** — URLs, `job.data`, store
+  lookups. The stores parse it (`identity.resolveId`) to derive scoped paths; the
+  queue parses the tenant to pick its queue. So most call sites still pass a single
+  "receiptId", it's just composite now. `identity.resolveId` is lenient: a **bare**
+  id (no `:`) resolves under the default scope, which is why pre-existing ids and
+  single-tenant tests keep working.
+- **Identity on a request** (`identity.resolveIdentity`): `X-Tenant-Id`/`X-User-Id`
+  headers → `tenantId`/`userId` form fields → the configured default
+  (`config.defaultTenantId`/`defaultUserId`, env `DEFAULT_TENANT_ID`/`DEFAULT_USER_ID`,
+  default `main`/`main`). It's resolved at **creation** (upload) and on collection
+  endpoints (`GET /api/receipts`, `/api/products`, profile CRUD); receipt-scoped
+  routes (`…/receipts/:id/…`) derive the tenant from the composite `:id` instead.
+  **Strict mode:** set the defaults *empty* (`DEFAULT_TENANT_ID=`) and every request
+  must carry the headers or it 400s. Unset entirely falls back to `main` (dev/tests).
+- **Tenants are provisioned accounts** (`src/tenants.js`, a Redis SET `re:tenants`):
+  an upload for an unknown tenant 400s ("unknown tenant"). Create one with
+  `POST /api/tenants {tenantId}` (or `receipts tenant create <id>`), which also seeds
+  that tenant's example profiles. The **default tenant is always allowed** and is
+  auto-registered at boot (`server.js` calls `tenants.ensureDefault()`).
+- **What's scoped vs shared:**
+
+  | Data | Scope | Location / key |
+  |------|-------|----------------|
+  | receipts, uploads, profile **results**, product **results** | per tenant **+ user** | `data/<tenant>/<user>/…` |
+  | profile **definitions** | per **tenant** (lazily seeded) | `data/<tenant>/receiptProfiles/` |
+  | enrich cache | per **tenant** | `<tenant>:enrich:tavily:<sha1>` |
+  | product (SKU→product) cache + `/products/monitor` events | **global** (cross-tenant) | `products:<resolver>:<sha1>`, `products:events` |
+
+  `store.list`/`resultStore.listAll`/`productStore.listAll` take a scope (default
+  identity); `profileStore.*` take a trailing `{ tenantId }` (default tenant).
+- **Per-tenant queues + the worker registry watch.** Each tenant has its own queue
+  `receipts-<tenant>`. The worker (`worker.js start()`) registers the default
+  tenant, lists `re:tenants`, runs one BullMQ `Worker` per tenant queue, and
+  **re-polls the registry** (every `TENANT_WATCH_MS`, default 5s) so a tenant
+  onboarded at runtime gets a Worker without a restart. This is exactly what
+  `test/acceptance/rest/95_multitenancy.sh` proves end-to-end (a runtime-created
+  tenant's upload reaching `done`).
+- **`:` is forbidden in BOTH BullMQ queue names and custom job ids** (see Guardrails),
+  so the queue uses a `-` separator and `identity.jobId()` hashes the composite id.
+
+Hermetic coverage: `test/{identity,tenants,multitenancy,queue}.test.js`; live
+coverage: the acceptance step above.
 
 ## Receipt profiles & transformers (post-OCR cleanup)
 
@@ -549,11 +605,15 @@ API_URL=http://localhost:8080 ./cli/products cache stats
 - `src/ocr/vision.js` must require `../config`/`../logger` (one level up). A
   past bug used `./config`/`./logger`, which broke the entire vision path with
   `MODULE_NOT_FOUND`; `ocr-vision.test.js` and `pipeline.test.js` guard it.
-- **BullMQ custom job ids must not contain `:`.** `queue.js` uses
-  `receipt-<id>`; a past `receipt:<id>` made *every* upload fail with HTTP 400
-  ("Custom Id cannot contain :"). The hermetic suite's fake Redis didn't catch
-  it (it doesn't validate ids) — the acceptance suite does, since it hits real
-  Redis. Keep job ids `:`-free.
+- **BullMQ forbids `:` in BOTH queue names AND custom job ids.** Composite ids are
+  full of `:`, so: the per-tenant queue uses a `-` separator (`receipts-<tenant>`,
+  `queue.js#queueNameFor`) and job ids hash the composite id (`identity.jobId` →
+  `receipt-<sha1>`). A past `receipt:<id>` job id, and (this session) a
+  `receipts:<tenant>` queue name, each made *every* upload fail with HTTP 400
+  ("Custom Id cannot contain :" / "Queue name cannot contain :"). The hermetic
+  suite's fake Redis doesn't validate either (it stores the job but never enqueues
+  to real BullMQ) — the **acceptance suite catches both**, since it hits real Redis.
+  Keep queue names and job ids `:`-free. `test/queue.test.js` guards the naming.
 - The acceptance suite must stay isolated: never point its teardown at the prod
   project, never bind the prod host port. Defaults (`test-receipt-enricher`,
   18080) already ensure this; the teardown guard refuses the prod name.

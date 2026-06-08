@@ -4,6 +4,7 @@ const store = require('../store');
 const ocr = require('../ocr');
 const parser = require('../parse/receiptParser');
 const { enrichItems } = require('../enrich');
+const identity = require('../identity');
 const logger = require('../logger');
 
 function money(n) {
@@ -55,10 +56,12 @@ async function processReceipt(receiptId) {
   });
   logger.info({ id: receiptId, items: parsed.items.length, provider }, 'parsed receipt');
 
-  // 3. Enrich items (Tavily); mutates items in place
+  // 3. Enrich items (Tavily); mutates items in place. The enrichment cache is
+  // tenant-scoped, so pass the receipt's tenant (parsed from its composite id).
   const enrichStart = Date.now();
   const items = parsed.items;
-  const enrichStats = await enrichItems(items, parsed.store?.name);
+  const { tenantId } = identity.scopeOf(receiptId);
+  const enrichStats = await enrichItems(items, parsed.store?.name, { tenantId });
   const current = await store.get(receiptId);
   current.items = items;
   current.timings = { ...current.timings, enrichMs: Date.now() - enrichStart };

@@ -8,6 +8,7 @@ const resultStore = require('../receiptProfiles/resultStore');
 const registry = require('../receiptProfiles/registry');
 const { applyProfileToReceipt } = require('../receiptProfiles/applyService');
 const { enqueueApplyProfile } = require('../queue');
+const identity = require('../identity');
 const view = require('../web/view');
 const logger = require('../logger');
 
@@ -35,11 +36,13 @@ router.get('/api/transformers', (req, res) => {
   res.json(registry.list());
 });
 
-// --- Profile CRUD ----------------------------------------------------------
+// --- Profile CRUD (profiles are scoped per TENANT) ---------------------------
+// Tenant comes from the request identity (X-Tenant-Id / tenantId / default).
 
 router.get('/api/receiptProfiles', async (req, res, next) => {
   try {
-    const all = await profileStore.list();
+    const { tenantId } = identity.resolveIdentity(req);
+    const all = await profileStore.list({ tenantId });
     res.json(all.map(summary));
   } catch (err) {
     next(err);
@@ -48,8 +51,9 @@ router.get('/api/receiptProfiles', async (req, res, next) => {
 
 router.post('/api/receiptProfiles', async (req, res, next) => {
   try {
-    const profile = await profileStore.create(req.body || {});
-    logger.info({ id: profile.id, name: profile.name, transformer: profile.transformer }, 'receipt profile created');
+    const { tenantId } = identity.resolveIdentity(req);
+    const profile = await profileStore.create(req.body || {}, { tenantId });
+    logger.info({ tenantId, id: profile.id, name: profile.name, transformer: profile.transformer }, 'receipt profile created');
     res.status(201).json(profile);
   } catch (err) {
     if (isValidationError(err)) return res.status(400).json({ error: err.message, details: err.errors });
@@ -59,7 +63,8 @@ router.post('/api/receiptProfiles', async (req, res, next) => {
 
 router.get('/api/receiptProfiles/:id', async (req, res, next) => {
   try {
-    const profile = await profileStore.get(req.params.id);
+    const { tenantId } = identity.resolveIdentity(req);
+    const profile = await profileStore.get(req.params.id, { tenantId });
     if (!profile) return res.status(404).json({ error: 'not found' });
     res.json(profile);
   } catch (err) {
@@ -69,7 +74,8 @@ router.get('/api/receiptProfiles/:id', async (req, res, next) => {
 
 router.put('/api/receiptProfiles/:id', async (req, res, next) => {
   try {
-    const updated = await profileStore.update(req.params.id, req.body || {});
+    const { tenantId } = identity.resolveIdentity(req);
+    const updated = await profileStore.update(req.params.id, req.body || {}, { tenantId });
     if (!updated) return res.status(404).json({ error: 'not found' });
     res.json(updated);
   } catch (err) {
@@ -80,7 +86,8 @@ router.put('/api/receiptProfiles/:id', async (req, res, next) => {
 
 router.delete('/api/receiptProfiles/:id', async (req, res, next) => {
   try {
-    const ok = await profileStore.remove(req.params.id);
+    const { tenantId } = identity.resolveIdentity(req);
+    const ok = await profileStore.remove(req.params.id, { tenantId });
     if (!ok) return res.status(404).json({ error: 'not found' });
     res.status(204).end();
   } catch (err) {
@@ -88,20 +95,20 @@ router.delete('/api/receiptProfiles/:id', async (req, res, next) => {
   }
 });
 
-// --- Apply + results -------------------------------------------------------
+// --- Apply + results ---------------------------------------------------------
+// Receipt-scoped routes derive their tenant FROM the receipt id (it's composite,
+// so it carries the tenant); profiles are then resolved within that tenant.
 
-// Apply a profile to an already-processed receipt. Synchronous by default
-// (Step 1; the transform is pure and fast). ?dryRun=1 runs the transform and
-// returns it without persisting. ?async=1 enqueues a childless `applyProfile`
-// job (Step 2) and returns 202 instead of running inline.
+// Apply a profile to an already-processed receipt. Synchronous by default.
+// ?dryRun=1 runs the transform without persisting. ?async=1 enqueues a childless
+// `applyProfile` job and returns 202 instead of running inline.
 router.post('/api/receipts/:id/applyProfile/:profileId', async (req, res, next) => {
   try {
-    // Async re-apply: validate existence up front (so unknown ids still 404),
-    // then enqueue and return 202. dryRun has no meaning for a queued apply.
     if (req.query.async && !req.query.dryRun) {
       const record = await store.get(req.params.id);
       if (!record) return res.status(404).json({ error: 'receipt not found' });
-      const profile = await profileStore.get(req.params.profileId);
+      const { tenantId } = identity.scopeOf(record.id);
+      const profile = await profileStore.get(req.params.profileId, { tenantId });
       if (!profile) return res.status(404).json({ error: 'profile not found' });
       await enqueueApplyProfile(record.id, profile.id);
       logger.info({ receiptId: record.id, profileId: profile.id }, 'profile apply enqueued (async)');
@@ -123,22 +130,24 @@ router.post('/api/receipts/:id/applyProfile/:profileId', async (req, res, next) 
   }
 });
 
-// Every profile result across all receipts (newest first).
+// Every profile result for the requesting identity (newest first).
 router.get('/api/profileResults', async (req, res, next) => {
   try {
-    res.json(await resultStore.listAll());
+    const { tenantId, userId } = identity.resolveIdentity(req);
+    res.json(await resultStore.listAll({ tenantId, userId }));
   } catch (err) {
     next(err);
   }
 });
 
-// Every result for ONE profile, across all receipts. Accepts a profile id or
-// name (results are keyed by id, so resolve a name first).
+// Every result for ONE profile, across the identity's receipts. Accepts a
+// profile id or name (results are keyed by id, so resolve a name first).
 router.get('/api/profileResults/:profileId', async (req, res, next) => {
   try {
-    const profile = await profileStore.get(req.params.profileId);
+    const { tenantId, userId } = identity.resolveIdentity(req);
+    const profile = await profileStore.get(req.params.profileId, { tenantId });
     const profileId = profile ? profile.id : req.params.profileId;
-    res.json(await resultStore.listByProfile(profileId));
+    res.json(await resultStore.listByProfile(profileId, { tenantId, userId }));
   } catch (err) {
     next(err);
   }
@@ -156,10 +165,13 @@ router.get('/api/receipts/:id/profileResults', async (req, res, next) => {
 
 router.get('/api/receipts/:id/profileResults/:profileId', async (req, res, next) => {
   try {
+    const record = await store.get(req.params.id);
+    if (!record) return res.status(404).json({ error: 'not found' });
     // Accept profile id or name; results are keyed by id, so resolve a name.
-    const profile = await profileStore.get(req.params.profileId);
+    const { tenantId } = identity.scopeOf(record.id);
+    const profile = await profileStore.get(req.params.profileId, { tenantId });
     const profileId = profile ? profile.id : req.params.profileId;
-    const result = await resultStore.get(req.params.id, profileId);
+    const result = await resultStore.get(record.id, profileId);
     if (!result) return res.status(404).json({ error: 'not found' });
     res.json(result);
   } catch (err) {
@@ -167,24 +179,25 @@ router.get('/api/receipts/:id/profileResults/:profileId', async (req, res, next)
   }
 });
 
-// --- Web view of a profile-applied receipt ---------------------------------
+// --- Web view of a profile-applied receipt -----------------------------------
 
-// HTML list of every profile result across all receipts. Mirrors the receipts
-// list at `/`; each row links to the per-result view below.
+// HTML list of every profile result for the requesting identity.
 router.get('/profileResults', async (req, res, next) => {
   try {
-    res.type('html').send(view.renderProfileResultList(await resultStore.listAll()));
+    const { tenantId, userId } = identity.resolveIdentity(req);
+    res.type('html').send(view.renderProfileResultList(await resultStore.listAll({ tenantId, userId })));
   } catch (err) {
     next(err);
   }
 });
 
-// HTML list filtered to ONE profile (id or name), across all receipts.
+// HTML list filtered to ONE profile (id or name), across the identity's receipts.
 router.get('/profileResults/:profileId', async (req, res, next) => {
   try {
-    const profile = await profileStore.get(req.params.profileId);
+    const { tenantId, userId } = identity.resolveIdentity(req);
+    const profile = await profileStore.get(req.params.profileId, { tenantId });
     const profileId = profile ? profile.id : req.params.profileId;
-    const results = await resultStore.listByProfile(profileId);
+    const results = await resultStore.listByProfile(profileId, { tenantId, userId });
     res.type('html').send(
       view.renderProfileResultList(results, { filter: profile ? profile.name : req.params.profileId })
     );
@@ -202,7 +215,8 @@ router.get('/receipts/:id/profileResults/:profileId/view', async (req, res, next
   try {
     const record = await store.get(req.params.id);
     if (!record) return res.status(404).send('Receipt not found');
-    const profile = await profileStore.get(req.params.profileId);
+    const { tenantId } = identity.scopeOf(record.id);
+    const profile = await profileStore.get(req.params.profileId, { tenantId });
     const result =
       (profile && (await resultStore.get(record.id, profile.id))) ||
       (await applyProfileToReceipt(req.params.id, req.params.profileId, { dryRun: true }));

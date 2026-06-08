@@ -1,48 +1,63 @@
 'use strict';
 
-const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
-const config = require('../config');
+const identity = require('../identity');
 
-// Profile results live OUTSIDE the receipt record, one file per applied profile:
-//   DATA_DIR/profileResults/<receiptId>/<profileId>.json
-// Keyed on the profile id (stable across renames). One subdir per receipt makes
-// "list every result for this receipt" a plain readdir.
+// Profile results live OUTSIDE the receipt record, one file per applied profile,
+// scoped to the receipt's tenant/user (private, like the receipt itself):
+//   <dataDir>/<tenant>/<user>/profileResults/<receiptCacheId>/<profileId>.json
+// The result's `receiptId` is the COMPOSITE receipt id, which the store parses
+// (src/identity.js) to find the scoped directory. Keyed on the profile id
+// (stable across renames). listAll/listByProfile take an explicit scope (default
+// identity) since they have no receipt id to derive it from.
 
-const baseDir = config.receiptProfiles.resultsDir;
-
-function ensureBase() {
-  fs.mkdirSync(baseDir, { recursive: true });
-}
-ensureBase();
-
+// Per-receipt directory from a composite (or bare) receipt id; null if malformed.
 function receiptDir(receiptId) {
-  return path.join(baseDir, receiptId);
+  try {
+    const { tenantId, userId, cacheId } = identity.resolveId(receiptId);
+    return path.join(identity.userDataDir({ tenantId, userId }, 'profileResults'), cacheId);
+  } catch {
+    return null;
+  }
 }
 function resultPath(receiptId, profileId) {
-  return path.join(receiptDir(receiptId), `${profileId}.json`);
+  const dir = receiptDir(receiptId);
+  return dir ? path.join(dir, `${profileId}.json`) : null;
+}
+
+// The profileResults dir for one identity (default scope), for listAll/byProfile.
+function scopedRoot({ tenantId, userId } = {}) {
+  const def = identity.defaultScope();
+  return identity.userDataDir(
+    { tenantId: tenantId || def.tenantId, userId: userId || def.userId },
+    'profileResults'
+  );
 }
 
 async function save(result) {
   const { receiptId, profileId } = result;
-  await fsp.mkdir(receiptDir(receiptId), { recursive: true });
-  const tmp = resultPath(receiptId, profileId) + '.tmp';
+  const target = resultPath(receiptId, profileId);
+  if (!target) throw new identity.IdentityError(400, `cannot save result for invalid receipt id "${receiptId}"`);
+  await fsp.mkdir(path.dirname(target), { recursive: true });
+  const tmp = target + '.tmp';
   await fsp.writeFile(tmp, JSON.stringify(result, null, 2));
-  await fsp.rename(tmp, resultPath(receiptId, profileId));
+  await fsp.rename(tmp, target);
   return result;
 }
 
 async function get(receiptId, profileId) {
+  const target = resultPath(receiptId, profileId);
+  if (!target) return null;
   try {
-    return JSON.parse(await fsp.readFile(resultPath(receiptId, profileId), 'utf8'));
+    return JSON.parse(await fsp.readFile(target, 'utf8'));
   } catch (err) {
     if (err.code === 'ENOENT') return null;
     throw err;
   }
 }
 
-// Read every result file in one receipt's subdir. Tolerant: missing dir → [],
+// Read every result file in a directory. Tolerant: missing dir → [],
 // unreadable file → skipped.
 async function readDir(dir) {
   let files;
@@ -64,33 +79,35 @@ async function readDir(dir) {
 }
 
 async function list(receiptId) {
-  const out = await readDir(receiptDir(receiptId));
+  const dir = receiptDir(receiptId);
+  if (!dir) return [];
+  const out = await readDir(dir);
   out.sort((a, b) => (a.appliedAt < b.appliedAt ? 1 : -1));
   return out;
 }
 
-// Every result across every receipt, newest first. Walks each receipt subdir
-// (one per receipt) under baseDir and flattens.
-async function listAll() {
+// Every result for one identity, newest first. Walks each receipt subdir under
+// the identity's profileResults root and flattens.
+async function listAll(scope) {
   let dirents;
   try {
-    dirents = await fsp.readdir(baseDir, { withFileTypes: true });
+    dirents = await fsp.readdir(scopedRoot(scope), { withFileTypes: true });
   } catch {
     return [];
   }
   const out = [];
   for (const d of dirents) {
     if (!d.isDirectory()) continue;
-    out.push(...(await readDir(path.join(baseDir, d.name))));
+    out.push(...(await readDir(path.join(scopedRoot(scope), d.name))));
   }
   out.sort((a, b) => (a.appliedAt < b.appliedAt ? 1 : -1));
   return out;
 }
 
-// Every result for one profile (across all receipts), newest first. Results are
+// Every result for one profile (within one identity), newest first. Results are
 // keyed by profile id, so callers pass an id (resolve a name upstream).
-async function listByProfile(profileId) {
-  const all = await listAll();
+async function listByProfile(profileId, scope) {
+  const all = await listAll(scope);
   return all.filter((r) => r.profileId === profileId);
 }
 

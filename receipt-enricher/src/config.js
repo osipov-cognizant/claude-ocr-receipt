@@ -33,6 +33,20 @@ const config = {
   env: process.env.NODE_ENV || 'development',
   logLevel: process.env.LOG_LEVEL || 'info',
 
+  // --- Multi-tenancy ---------------------------------------------------------
+  // Every resource is scoped to an identity: a (tenantId, userId) pair. The
+  // public, API-facing id of a resource is the COMPOSITE id
+  // `<tenantId>:<userId>:<cacheId>` (see src/identity.js), so an id is
+  // self-describing and storage is physically isolated per tenant/user.
+  //
+  // These defaults are the IMPLICIT identity used when a request/CLI omits one,
+  // so a single-tenant deployment can pass nothing and everything lands under
+  // `main/main`. Set them EMPTY (`DEFAULT_TENANT_ID=`) to require explicit
+  // identity on every request — strict multi-tenant mode. Leaving the vars
+  // unset entirely falls back to `main` for convenience (dev + tests).
+  defaultTenantId: process.env.DEFAULT_TENANT_ID === undefined ? 'main' : process.env.DEFAULT_TENANT_ID,
+  defaultUserId: process.env.DEFAULT_USER_ID === undefined ? 'main' : process.env.DEFAULT_USER_ID,
+
   port: int(process.env.PORT, 8080),
   // Used to build shareable links (Telegram replies, API responses).
   publicBaseUrl: (process.env.PUBLIC_BASE_URL || `http://localhost:${int(process.env.PORT, 8080)}`).replace(/\/$/, ''),
@@ -42,9 +56,11 @@ const config = {
   queueConcurrency: int(process.env.QUEUE_CONCURRENCY, 2),
   jobAttempts: int(process.env.JOB_ATTEMPTS, 3),
 
+  // Base data dir. Per-tenant/user records live UNDER it at
+  // `<dataDir>/<tenant>/<user>/{receipts,uploads,profileResults,products}` and
+  // per-tenant profile definitions at `<dataDir>/<tenant>/receiptProfiles`
+  // (resolved by src/identity.js, not by fixed paths here).
   dataDir,
-  uploadsDir: path.join(dataDir, 'uploads'),
-  receiptsDir: path.join(dataDir, 'receipts'),
   maxUploadBytes: int(process.env.MAX_UPLOAD_MB, 15) * 1024 * 1024,
 
   // Receipt Profiles: user-defined transformation rules applied to a parsed
@@ -52,8 +68,8 @@ const config = {
   // JSON, mirroring the receipt store. Limits guard the user-supplied rules
   // (regex compile + length caps) since the API is unauthenticated.
   receiptProfiles: {
-    profilesDir: path.join(dataDir, 'receiptProfiles'),
-    resultsDir: path.join(dataDir, 'profileResults'),
+    // profile definitions (per tenant) and results (per tenant/user) are stored
+    // under dataDir via src/identity.js path helpers, not fixed paths.
     // Transformers are code modules shipped WITH the app (not user-uploaded), so
     // they live under src, not DATA_DIR. A profile references one by id.
     transformersDir: path.join(__dirname, 'receiptProfiles', 'transformers'),
@@ -122,8 +138,8 @@ const config = {
     resolver: (process.env.PRODUCT_RESOLVER || 'anthropic').toLowerCase(),
     // Resolver modules ship WITH the app (code, not user data), like transformers.
     resolversDir: path.join(__dirname, 'products', 'resolvers'),
-    // Durable product results, mirroring the receipt + profile-result stores.
-    resultsDir: path.join(dataDir, 'products'),
+    // Durable product results mirror the receipt + profile-result stores: stored
+    // per tenant/user under dataDir via src/identity.js (not a fixed path).
     // Cap on line items resolved per receipt (each item is one backend call).
     maxItems: int(process.env.PRODUCT_MAX_ITEMS, 100),
     // Max line-item lookups to run concurrently within one receipt. Each lookup
@@ -178,6 +194,11 @@ const config = {
     token: process.env.TELEGRAM_BOT_TOKEN || '',
     // Where the bot uploads receipts. Inside compose this is the api service.
     apiUrl: (process.env.API_URL || `http://localhost:${int(process.env.PORT, 8080)}`).replace(/\/$/, ''),
+    // Tenant the bot's uploads belong to (must be provisioned, unless it's the
+    // server default). Empty = let the server use its default tenant. Each
+    // Telegram user maps to a distinct userId (`tg_<telegram-user-id>`), so a
+    // tenant's Telegram users are isolated from one another.
+    tenantId: process.env.TELEGRAM_TENANT_ID || '',
   },
 };
 

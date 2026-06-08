@@ -13,7 +13,17 @@ if (!config.telegram.enabled) {
 const bot = new Telegraf(config.telegram.token);
 const API = config.telegram.apiUrl;
 
-async function uploadToApi(fileLink, filename, mimeType) {
+// Map a Telegram user to an identity: a configured tenant (or the server
+// default) and a per-user id `tg_<telegram-user-id>`, so each Telegram user's
+// receipts are isolated within the tenant.
+function identityHeaders(telegramUserId) {
+  const headers = {};
+  if (config.telegram.tenantId) headers['X-Tenant-Id'] = config.telegram.tenantId;
+  if (telegramUserId != null) headers['X-User-Id'] = `tg_${telegramUserId}`;
+  return headers;
+}
+
+async function uploadToApi(fileLink, filename, mimeType, telegramUserId) {
   const imgRes = await fetch(fileLink);
   if (!imgRes.ok) throw new Error(`could not download telegram file (${imgRes.status})`);
   const buf = Buffer.from(await imgRes.arrayBuffer());
@@ -22,7 +32,11 @@ async function uploadToApi(fileLink, filename, mimeType) {
   form.append('source', 'telegram');
   form.append('receipt', new Blob([buf], { type: mimeType || 'image/jpeg' }), filename || 'receipt.jpg');
 
-  const res = await fetch(`${API}/api/receipts`, { method: 'POST', body: form });
+  const res = await fetch(`${API}/api/receipts`, {
+    method: 'POST',
+    body: form,
+    headers: identityHeaders(telegramUserId),
+  });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `API responded ${res.status}`);
   return data; // { id, status, statusUrl, viewUrl }
@@ -41,7 +55,7 @@ bot.on(message('photo'), async (ctx) => {
     const photos = ctx.message.photo;
     const largest = photos[photos.length - 1];
     const link = await ctx.telegram.getFileLink(largest.file_id);
-    const data = await uploadToApi(link.href, `${largest.file_unique_id}.jpg`, 'image/jpeg');
+    const data = await uploadToApi(link.href, `${largest.file_unique_id}.jpg`, 'image/jpeg', ctx.from && ctx.from.id);
     await ctx.reply(
       `Queued! View the breakdown here once it finishes:\n${data.viewUrl}\n\n(it updates live as items are enriched)`
     );
@@ -59,7 +73,7 @@ bot.on(message('document'), async (ctx) => {
   try {
     await ctx.reply('Got it — processing your receipt…');
     const link = await ctx.telegram.getFileLink(doc.file_id);
-    const data = await uploadToApi(link.href, doc.file_name || 'receipt.jpg', doc.mime_type);
+    const data = await uploadToApi(link.href, doc.file_name || 'receipt.jpg', doc.mime_type, ctx.from && ctx.from.id);
     await ctx.reply(`Queued! View the breakdown here:\n${data.viewUrl}`);
   } catch (err) {
     logger.error({ err: err.message }, 'telegram document handler failed');

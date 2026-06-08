@@ -164,21 +164,30 @@ with `ANTHROPIC_MODEL`, or set `VISION_PROVIDER=openai` with `OPENAI_API_KEY`.
 ### CLI
 
 ```bash
-receipts upload <image> [--wait] [--profile <id|name>]
+receipts upload <image> [--wait] [--profile <id|name>] [--tenant <t>] [--user <u>]
                                    # upload a photo; --wait blocks for results,
-                                   # --profile applies a receipt profile after OCR
-receipts status <id>               # full JSON record
-receipts list                      # recent receipts
+                                   # --profile applies a receipt profile after OCR,
+                                   # --tenant/--user set the owning identity
+receipts status <id>               # full JSON record (id is the composite id)
+receipts list                      # recent receipts (for TENANT_ID/USER_ID)
 receipts wait <id>                 # poll until done/failed
 receipts view <id>                 # print + open the web view
+receipts tenant create <id>        # provision a tenant account
+receipts tenant list               # list provisioned tenants
 receipts health                    # API + Redis status
 ```
 
-Point it at a remote host with `API_URL`:
+Point it at a remote host with `API_URL`, and set the identity with
+`TENANT_ID`/`USER_ID` (or `--tenant`/`--user` on `upload`):
 
 ```bash
 API_URL=http://my-server:8080 receipts upload receipt.jpg --wait
+# Multi-tenant: provision a tenant once, then upload under it.
+API_URL=http://my-server:8080 receipts tenant create acme
+TENANT_ID=acme USER_ID=alice API_URL=http://my-server:8080 receipts upload receipt.jpg --wait
 ```
+
+See [Multi-tenancy](#multi-tenancy) for the identity model.
 
 A companion CLI, **`products`**, manages the product layer — notably the shared
 product cache (snapshot it to a file and restore it, e.g. to seed a known cache
@@ -223,6 +232,30 @@ curl http://localhost:8080/api/receipts          # list
 # Profile-applied view: http://localhost:8080/receipts/<id>/profileResults/usGrocery1/view
 # Original photo:     http://localhost:8080/receipts/<id>/image
 ```
+
+---
+
+## Multi-tenancy
+
+Every resource is scoped to an identity — a **(tenant, user)** pair — and a
+resource's public id is the composite `"<tenant>:<user>:<cacheId>"`. Out of the
+box everything lands under **`main/main`**, so single-tenant use needs no extra
+setup. For multi-tenant deployments:
+
+- **Identity on a request** comes from the `X-Tenant-Id` / `X-User-Id` headers
+  (or `tenantId`/`userId` form fields), defaulting to `DEFAULT_TENANT_ID` /
+  `DEFAULT_USER_ID`. Set those **empty** to require explicit identity on every
+  request (strict mode). The CLI takes `TENANT_ID`/`USER_ID` env vars or
+  `--tenant`/`--user` on `upload`.
+- **Tenants are accounts.** Provision one before its first upload —
+  `receipts tenant create acme` (or `POST /api/tenants {"tenantId":"acme"}`); an
+  upload for an unknown tenant is rejected. The default tenant is auto-created.
+- **What's isolated vs shared:** receipts, profile results and product results
+  are private per tenant+user (`DATA_DIR/<tenant>/<user>/…`); profile definitions
+  and the enrichment cache are per tenant; the product (SKU→product) cache is
+  global across tenants. Each tenant gets its own worker queue (`receipts-<tenant>`).
+
+Full details: [`docs/API.md` → Identity & multi-tenancy](docs/API.md#identity--multi-tenancy).
 
 ---
 
@@ -274,6 +307,9 @@ All via `.env` (see `.env.example`). Highlights:
 |----------------------|--------------------------|----------------------------------------------|
 | `PORT`               | `8080`                   | API port                                     |
 | `PUBLIC_BASE_URL`    | `http://localhost:8080`  | Used to build shareable links                |
+| `DEFAULT_TENANT_ID`  | `main`                   | Implicit tenant when a request omits one; set **empty** for strict multi-tenant (see Multi-tenancy) |
+| `DEFAULT_USER_ID`    | `main`                   | Implicit user when a request omits one       |
+| `TELEGRAM_TENANT_ID` | —                        | tenant the bot's uploads belong to (empty = server default; each TG user → `tg_<id>`) |
 | `OCR_PROVIDER`       | `auto`                   | `auto` \| `vision` \| `tesseract`            |
 | `VISION_PROVIDER`    | `anthropic`              | `anthropic` \| `openai`                      |
 | `ANTHROPIC_API_KEY`  | —                        | enables vision extraction                    |

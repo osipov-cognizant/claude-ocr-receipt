@@ -2,6 +2,7 @@
 
 const { Queue, FlowProducer } = require('bullmq');
 const config = require('./config');
+const identity = require('./identity');
 const { createConnection } = require('./redis');
 
 // Per-job options shared by the plain Queue and the FlowProducer. A FlowProducer
@@ -15,47 +16,74 @@ const defaultJobOptions = {
   removeOnFail: { age: 60 * 60 * 24 * 7 },
 };
 
-// One connection dedicated to the producer-side Queue.
-const connection = createConnection();
+// MULTI-TENANCY: each tenant gets its own queue, `receipts-<tenant>`. BullMQ
+// rejects ':' in BOTH queue names and custom job ids, so the queue name uses a
+// '-' separator (tenant ids are validated [A-Za-z0-9_-], so `receipts-<tenant>`
+// is unique per tenant) and job ids hash the composite id (identity.jobId). The
+// worker (src/worker.js) runs one BullMQ Worker per tenant queue, discovered via
+// the tenant registry (src/tenants.js).
+function queueNameFor(tenantId) {
+  return `${config.queueName}-${tenantId}`;
+}
 
-const receiptsQueue = new Queue(config.queueName, { connection, defaultJobOptions });
+// One shared connection for all producer-side Queues + the FlowProducer. Created
+// lazily so merely requiring this module opens nothing (keeps the hermetic tests'
+// queue stub simple — they replace this module wholesale before it loads).
+let connection = null;
+function conn() {
+  if (!connection) connection = createConnection();
+  return connection;
+}
 
-// FlowProducer submits a dependent job tree atomically (child runs first, then
-// the parent). Same connection pattern as the Queue above.
-const flowProducer = new FlowProducer({ connection: createConnection() });
+const queues = new Map();
+function queueFor(tenantId) {
+  if (!queues.has(tenantId)) {
+    queues.set(tenantId, new Queue(queueNameFor(tenantId), { connection: conn(), defaultJobOptions }));
+  }
+  return queues.get(tenantId);
+}
+
+let _flow = null;
+function flowProducer() {
+  if (!_flow) _flow = new FlowProducer({ connection: conn() });
+  return _flow;
+}
+
+// The tenant a (composite) receipt id belongs to — selects its queue.
+function tenantOf(receiptId) {
+  return identity.scopeOf(receiptId).tenantId;
+}
 
 /**
- * Enqueue a receipt for processing. The job payload is intentionally tiny;
- * the durable record lives on disk and is looked up by id in the worker.
+ * Enqueue a receipt for processing on its tenant's queue. The job payload is
+ * intentionally tiny; the durable record lives on disk and is looked up by its
+ * composite id in the worker.
  */
 async function enqueueReceipt(receiptId) {
-  return receiptsQueue.add(
+  return queueFor(tenantOf(receiptId)).add(
     'process-receipt',
     { receiptId },
-    // NOTE: BullMQ rejects ':' in custom job ids ("Custom Id cannot contain :"),
-    // so use a '-' separator.
-    { jobId: `receipt-${receiptId}` }
+    { jobId: identity.jobId('receipt', receiptId) }
   );
 }
 
 /**
  * Enqueue a flow that runs the OCR pipeline FIRST, then applies a profile:
  * child `process-receipt` (upstream) -> parent `applyProfile` (downstream).
- * The parent waits in `waiting-children` until the child completes. Used when a
- * profile is chosen at upload time.
  */
 async function enqueueProcessAndApply(receiptId, profileId) {
-  return flowProducer.add({
+  const qn = queueNameFor(tenantOf(receiptId));
+  return flowProducer().add({
     name: 'applyProfile',
-    queueName: config.queueName,
+    queueName: qn,
     data: { receiptId, profileId },
-    opts: { ...defaultJobOptions, jobId: `applyProfile-${receiptId}-${profileId}` },
+    opts: { ...defaultJobOptions, jobId: identity.jobId('applyProfile', receiptId, profileId) },
     children: [
       {
         name: 'process-receipt',
-        queueName: config.queueName,
+        queueName: qn,
         data: { receiptId },
-        opts: { ...defaultJobOptions, jobId: `receipt-${receiptId}`, failParentOnFailure: true },
+        opts: { ...defaultJobOptions, jobId: identity.jobId('receipt', receiptId), failParentOnFailure: true },
       },
     ],
   });
@@ -66,10 +94,10 @@ async function enqueueProcessAndApply(receiptId, profileId) {
  * that's already been processed — the async variant of the sync apply route.
  */
 async function enqueueApplyProfile(receiptId, profileId) {
-  return receiptsQueue.add(
+  return queueFor(tenantOf(receiptId)).add(
     'applyProfile',
     { receiptId, profileId },
-    { jobId: `applyProfile-${receiptId}-${profileId}` }
+    { jobId: identity.jobId('applyProfile', receiptId, profileId) }
   );
 }
 
@@ -79,39 +107,37 @@ async function enqueueApplyProfile(receiptId, profileId) {
  * sync resolve route.
  */
 async function enqueueResolveProducts(receiptId, profileId) {
-  return receiptsQueue.add(
+  return queueFor(tenantOf(receiptId)).add(
     'resolveProducts',
     { receiptId, profileId },
-    { jobId: `resolveProducts-${receiptId}-${profileId}` }
+    { jobId: identity.jobId('resolveProducts', receiptId, profileId) }
   );
 }
 
 /**
  * Enqueue the full end-to-end flow for a single upload: OCR pipeline, then
- * profile, then product resolution. The dependency chain runs bottom-up:
- *   process-receipt (grandchild) -> applyProfile (child) -> resolveProducts (parent).
- * Each parent waits in `waiting-children` until its child completes, and
- * `failParentOnFailure` propagates a failure up the chain. Used when an upload
- * both selects a profile and requests products.
+ * profile, then product resolution, all on the receipt's tenant queue. Runs
+ * bottom-up: process-receipt -> applyProfile -> resolveProducts.
  */
 async function enqueueProcessApplyAndResolve(receiptId, profileId) {
-  return flowProducer.add({
+  const qn = queueNameFor(tenantOf(receiptId));
+  return flowProducer().add({
     name: 'resolveProducts',
-    queueName: config.queueName,
+    queueName: qn,
     data: { receiptId, profileId },
-    opts: { ...defaultJobOptions, jobId: `resolveProducts-${receiptId}-${profileId}` },
+    opts: { ...defaultJobOptions, jobId: identity.jobId('resolveProducts', receiptId, profileId) },
     children: [
       {
         name: 'applyProfile',
-        queueName: config.queueName,
+        queueName: qn,
         data: { receiptId, profileId },
-        opts: { ...defaultJobOptions, jobId: `applyProfile-${receiptId}-${profileId}`, failParentOnFailure: true },
+        opts: { ...defaultJobOptions, jobId: identity.jobId('applyProfile', receiptId, profileId), failParentOnFailure: true },
         children: [
           {
             name: 'process-receipt',
-            queueName: config.queueName,
+            queueName: qn,
             data: { receiptId },
-            opts: { ...defaultJobOptions, jobId: `receipt-${receiptId}`, failParentOnFailure: true },
+            opts: { ...defaultJobOptions, jobId: identity.jobId('receipt', receiptId), failParentOnFailure: true },
           },
         ],
       },
@@ -120,12 +146,13 @@ async function enqueueProcessApplyAndResolve(receiptId, profileId) {
 }
 
 module.exports = {
-  receiptsQueue,
+  queueNameFor,
+  queueFor,
   flowProducer,
   enqueueReceipt,
   enqueueProcessAndApply,
   enqueueApplyProfile,
   enqueueResolveProducts,
   enqueueProcessApplyAndResolve,
-  connection,
+  connection: conn,
 };

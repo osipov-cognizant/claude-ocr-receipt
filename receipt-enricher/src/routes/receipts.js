@@ -6,6 +6,8 @@ const config = require('../config');
 const store = require('../store');
 const { enqueueReceipt, enqueueProcessAndApply, enqueueProcessApplyAndResolve } = require('../queue');
 const profileStore = require('../receiptProfiles/profileStore');
+const identity = require('../identity');
+const tenants = require('../tenants');
 const view = require('../web/view');
 const logger = require('../logger');
 
@@ -53,13 +55,22 @@ router.post(
         (req.files?.image && req.files.image[0]);
       if (!f) return res.status(400).json({ error: 'No image uploaded. Use field "receipt".' });
 
+      // Resolve the identity this upload belongs to (X-Tenant-Id/X-User-Id
+      // headers, tenantId/userId form fields, or the configured default). Tenants
+      // are provisioned accounts: reject an upload for an unknown tenant.
+      const { tenantId, userId } = identity.resolveIdentity(req);
+      if (!(await tenants.isAllowed(tenantId))) {
+        return res.status(400).json({ error: `unknown tenant "${tenantId}"` });
+      }
+
       // Optional: apply a profile after OCR. An explicit form field wins;
       // otherwise fall back to a server-wide default (DEFAULT_PROFILE_ID).
+      // Profiles are tenant-scoped, so resolve within this upload's tenant.
       const requestedProfileId =
         (req.body && req.body.profileId) || config.receiptProfiles.defaultProfileId || null;
       let profile = null;
       if (requestedProfileId) {
-        profile = await profileStore.get(requestedProfileId);
+        profile = await profileStore.get(requestedProfileId, { tenantId });
         if (!profile) {
           return res.status(400).json({ error: `unknown profile "${requestedProfileId}"` });
         }
@@ -70,6 +81,8 @@ router.post(
         mimeType: f.mimetype,
         originalName: f.originalname,
         source: (req.body && req.body.source) || 'api',
+        tenantId,
+        userId,
       });
 
       // Product resolution needs a profile result, so it only applies when a
@@ -112,7 +125,9 @@ router.post(
 router.get('/api/receipts', async (req, res, next) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
-    const records = await store.list({ limit });
+    // List only the requesting identity's receipts (header/default scope).
+    const { tenantId, userId } = identity.resolveIdentity(req);
+    const records = await store.list({ tenantId, userId, limit });
     res.json(
       records.map((r) => ({
         id: r.id,

@@ -1,25 +1,36 @@
 'use strict';
 
-const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
-const crypto = require('crypto');
-const config = require('./config');
+const identity = require('./identity');
 
-function ensureDirs() {
-  for (const dir of [config.dataDir, config.uploadsDir, config.receiptsDir]) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-}
-ensureDirs();
+// Records and images are stored per tenant/user:
+//   <dataDir>/<tenant>/<user>/receipts/<cacheId>.json
+//   <dataDir>/<tenant>/<user>/uploads/<cacheId>.<ext>
+// A receipt's public `id` is the COMPOSITE id `<tenant>:<user>:<cacheId>`, so it
+// self-describes its location; the store parses it (src/identity.js) to find the
+// scoped paths. Directories are created lazily per scope on first write.
 
 function newId() {
-  // Short, URL-safe, time-sortable-ish id.
-  return crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+  return identity.newCacheId();
 }
 
-function recordPath(id) {
-  return path.join(config.receiptsDir, `${id}.json`);
+function receiptsDir(scope) {
+  return identity.userDataDir(scope, 'receipts');
+}
+function uploadsDir(scope) {
+  return identity.userDataDir(scope, 'uploads');
+}
+
+// Resolve a composite (or bare) id to its on-disk record path, or null if the id
+// is malformed (so callers surface a clean 404 rather than throwing).
+function recordPathOf(id) {
+  try {
+    const r = identity.resolveId(id);
+    return path.join(receiptsDir({ tenantId: r.tenantId, userId: r.userId }), `${r.cacheId}.json`);
+  } catch {
+    return null;
+  }
 }
 
 const EXT_BY_MIME = {
@@ -38,19 +49,26 @@ function extForMime(mime, fallbackName) {
 }
 
 /**
- * Persist an uploaded image buffer and create the initial receipt record.
- * @returns {Promise<object>} the created record
+ * Persist an uploaded image buffer and create the initial receipt record under
+ * the given identity. `tenantId`/`userId` default to the configured identity.
+ * @returns {Promise<object>} the created record (its `id` is the composite id)
  */
-async function createReceipt({ buffer, mimeType, originalName, source }) {
-  const id = newId();
+async function createReceipt({ buffer, mimeType, originalName, source, tenantId, userId }) {
+  const def = identity.defaultScope();
+  const scope = { tenantId: tenantId || def.tenantId, userId: userId || def.userId };
+  const cacheId = newId();
+  const id = identity.buildId(scope.tenantId, scope.userId, cacheId); // validates scope
   const ext = extForMime(mimeType, originalName);
-  const imageFile = `${id}${ext}`;
-  const imagePath = path.join(config.uploadsDir, imageFile);
-  await fsp.writeFile(imagePath, buffer);
+  const imageFile = `${cacheId}${ext}`;
+
+  await fsp.mkdir(uploadsDir(scope), { recursive: true });
+  await fsp.writeFile(path.join(uploadsDir(scope), imageFile), buffer);
 
   const now = new Date().toISOString();
   const record = {
     id,
+    tenantId: scope.tenantId,
+    userId: scope.userId,
     status: 'queued', // queued | processing | done | failed
     source: source || 'api',
     createdAt: now,
@@ -74,16 +92,21 @@ async function createReceipt({ buffer, mimeType, originalName, source }) {
 }
 
 async function save(record) {
+  const target = recordPathOf(record.id);
+  if (!target) throw new identity.IdentityError(400, `cannot save record with invalid id "${record.id}"`);
+  await fsp.mkdir(path.dirname(target), { recursive: true });
   record.updatedAt = new Date().toISOString();
-  const tmp = recordPath(record.id) + '.tmp';
+  const tmp = target + '.tmp';
   await fsp.writeFile(tmp, JSON.stringify(record, null, 2));
-  await fsp.rename(tmp, recordPath(record.id)); // atomic-ish write
+  await fsp.rename(tmp, target); // atomic-ish write
   return record;
 }
 
 async function get(id) {
+  const target = recordPathOf(id);
+  if (!target) return null; // malformed id -> treat as not found
   try {
-    const raw = await fsp.readFile(recordPath(id), 'utf8');
+    const raw = await fsp.readFile(target, 'utf8');
     return JSON.parse(raw);
   } catch (err) {
     if (err.code === 'ENOENT') return null;
@@ -102,10 +125,22 @@ async function update(id, patch) {
   return save(next);
 }
 
-async function list({ limit = 50 } = {}) {
+/**
+ * List a single identity's receipts, newest first. Scope defaults to the
+ * configured identity (so single-tenant callers pass only `{ limit }`).
+ */
+async function list({ tenantId, userId, limit = 50 } = {}) {
+  const def = identity.defaultScope();
+  const scope = { tenantId: tenantId || def.tenantId, userId: userId || def.userId };
+  let dir;
+  try {
+    dir = receiptsDir(scope);
+  } catch {
+    return []; // invalid scope -> nothing to list
+  }
   let files;
   try {
-    files = await fsp.readdir(config.receiptsDir);
+    files = await fsp.readdir(dir);
   } catch {
     return [];
   }
@@ -113,7 +148,7 @@ async function list({ limit = 50 } = {}) {
   for (const f of files) {
     if (!f.endsWith('.json')) continue;
     try {
-      const raw = await fsp.readFile(path.join(config.receiptsDir, f), 'utf8');
+      const raw = await fsp.readFile(path.join(dir, f), 'utf8');
       records.push(JSON.parse(raw));
     } catch {
       /* skip unreadable */
@@ -124,7 +159,8 @@ async function list({ limit = 50 } = {}) {
 }
 
 function imagePathFor(record) {
-  return path.join(config.uploadsDir, record.image.file);
+  const { tenantId, userId } = identity.resolveId(record.id);
+  return path.join(uploadsDir({ tenantId, userId }), record.image.file);
 }
 
 module.exports = { createReceipt, save, get, update, list, imagePathFor, newId };

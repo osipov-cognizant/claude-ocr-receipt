@@ -4,16 +4,22 @@ const config = require('./config');
 const logger = require('./logger');
 const { createApp } = require('./app');
 const profileStore = require('./receiptProfiles/profileStore');
+const tenants = require('./tenants');
 
 const app = createApp();
 
-// Seed the shipped example receipt profile(s) on first boot (no-op if any exist).
-profileStore
-  .seedIfEmpty()
-  .then((n) => {
-    if (n) logger.info({ seeded: n }, 'seeded receipt profiles');
-  })
-  .catch((err) => logger.warn({ err: err.message }, 'receipt profile seeding failed'));
+// Register the default tenant (so it's listed + its queue is consumed) and seed
+// its shipped example receipt profile(s) on first boot (no-op if any exist).
+// Other tenants are provisioned (and seeded) on demand via POST /api/tenants.
+(async () => {
+  try {
+    await tenants.ensureDefault();
+    const n = await profileStore.seedIfEmpty();
+    if (n) logger.info({ tenant: config.defaultTenantId, seeded: n }, 'seeded receipt profiles');
+  } catch (err) {
+    logger.warn({ err: err.message }, 'default tenant bootstrap failed');
+  }
+})();
 
 const server = app.listen(config.port, '0.0.0.0', () => {
   logger.info(

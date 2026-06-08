@@ -37,7 +37,7 @@ function useTempDataDir(label = 'receipt-test') {
  */
 function installFakeRedis() {
   const store = new Map();
-  const calls = { get: 0, set: 0, ping: 0, lpush: 0, lrange: 0, ltrim: 0, incr: 0, del: 0, scan: 0, ttl: 0 };
+  const calls = { get: 0, set: 0, ping: 0, lpush: 0, lrange: 0, ltrim: 0, incr: 0, del: 0, scan: 0, ttl: 0, sadd: 0, smembers: 0, sismember: 0, srem: 0 };
   const client = {
     async get(key) {
       calls.get += 1;
@@ -101,6 +101,33 @@ function installFakeRedis() {
     async ttl(key) {
       calls.ttl += 1;
       return store.has(key) ? -1 : -2;
+    },
+    // --- minimal SET ops (used by the tenant registry, src/tenants.js) ---
+    async sadd(key, ...members) {
+      calls.sadd += 1;
+      const set = store.get(key) instanceof Set ? store.get(key) : new Set();
+      const before = set.size;
+      for (const m of members) set.add(String(m));
+      store.set(key, set);
+      return set.size - before;
+    },
+    async smembers(key) {
+      calls.smembers += 1;
+      const set = store.get(key);
+      return set instanceof Set ? [...set] : [];
+    },
+    async sismember(key, member) {
+      calls.sismember += 1;
+      const set = store.get(key);
+      return set instanceof Set && set.has(String(member)) ? 1 : 0;
+    },
+    async srem(key, ...members) {
+      calls.srem += 1;
+      const set = store.get(key);
+      if (!(set instanceof Set)) return 0;
+      let n = 0;
+      for (const m of members) if (set.delete(String(m))) n += 1;
+      return n;
     },
   };
 

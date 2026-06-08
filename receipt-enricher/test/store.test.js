@@ -29,7 +29,11 @@ test('createReceipt persists the real sample image and an initial record', async
     source: 'cli',
   });
 
-  assert.match(record.id, /^[0-9a-f]{16}$/, 'id is a 16-char hex token');
+  // The id is the COMPOSITE id <tenant>:<user>:<cacheId>. With no identity
+  // passed, it falls back to the configured default (main:main).
+  assert.match(record.id, /^main:main:[0-9a-f]{16}$/, 'id is a composite tenant:user:cacheId token');
+  assert.equal(record.tenantId, 'main');
+  assert.equal(record.userId, 'main');
   assert.equal(record.status, 'queued', 'new receipts start queued');
   assert.equal(record.source, 'cli');
   assert.equal(record.image.size, buffer.length, 'stored size matches the upload');

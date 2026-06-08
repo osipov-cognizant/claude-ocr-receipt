@@ -6,6 +6,8 @@ const logger = require('./logger');
 const receipts = require('./routes/receipts');
 const receiptProfiles = require('./routes/receiptProfiles');
 const products = require('./routes/products');
+const tenantsRoute = require('./routes/tenants');
+const tenants = require('./tenants');
 const profileStore = require('./receiptProfiles/profileStore');
 const { cache } = require('./redis');
 
@@ -32,15 +34,23 @@ function createApp() {
     const ok = redis === 'up';
     let receiptProfileCount = 0;
     try {
-      receiptProfileCount = await profileStore.count();
+      receiptProfileCount = await profileStore.count(); // default tenant's profiles
     } catch {
       /* a profile-store read error shouldn't fail the health check */
+    }
+    let tenantCount = 0;
+    try {
+      tenantCount = (await tenants.list()).length;
+    } catch {
+      /* a registry read error shouldn't fail the health check */
     }
     res.status(ok ? 200 : 503).json({
       status: ok ? 'ok' : 'degraded',
       redis,
       ocrProvider: config.ocrProvider,
       enrichment: config.enrich.enabled ? 'enabled' : 'disabled',
+      tenants: tenantCount,
+      defaultTenant: config.defaultTenantId || null,
       receiptProfiles: receiptProfileCount,
       products: {
         enabled: config.products.enabled,
@@ -50,14 +60,19 @@ function createApp() {
     });
   });
 
+  app.use(tenantsRoute);
   app.use(receipts);
   app.use(receiptProfiles);
   app.use(products);
 
-  // Error handler (multer + unexpected).
+  // Error handler (multer + identity + unexpected). An error carrying an
+  // explicit numeric `status` (e.g. IdentityError) wins; otherwise size errors
+  // map to 413 and everything else to 400.
   app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
-    const status = err.message && /too large|file size/i.test(err.message) ? 413 : 400;
+    const status =
+      Number.isInteger(err.status) ? err.status :
+      err.message && /too large|file size/i.test(err.message) ? 413 : 400;
     logger.warn({ err: err.message }, 'request error');
     res.status(status).json({ error: err.message || 'request failed' });
   });

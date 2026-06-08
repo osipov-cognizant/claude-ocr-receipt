@@ -21,7 +21,9 @@ test/acceptance/
    ├─ 10_health.sh  20_upload.sh  30_list.sh  40_image.sh  50_view.sh  60_errors.sh
    ├─ 70_applyProfile.sh        # apply a profile to a processed receipt (sync)
    ├─ 80_uploadWithProfile.sh   # upload with profileId → OCR-then-profile BullMQ flow
-   └─ 81_tesseractProfile.sh    # tesseractGroceryUs cleanup profile (Tesseract mode only)
+   ├─ 81_tesseractProfile.sh    # tesseractGroceryUs cleanup profile (Tesseract mode only)
+   ├─ 90_resolveProducts.sh     # resolve products from a profile result (sync/async/dryRun)
+   └─ 95_multitenancy.sh        # dynamic tenant onboarding, per-tenant queues, cross-tenant/user isolation
 ```
 
 Steps auto-discover: `run-all.sh` runs every `cli/*.sh` then `rest/*.sh` in name

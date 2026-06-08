@@ -5,6 +5,8 @@ const config = require('./config');
 const logger = require('./logger');
 const { createConnection } = require('./redis');
 const store = require('./store');
+const tenants = require('./tenants');
+const { queueNameFor } = require('./queue');
 const { processReceipt } = require('./pipeline');
 const applyService = require('./receiptProfiles/applyService');
 const resolveService = require('./products/resolveService');
@@ -37,23 +39,23 @@ async function dispatch(job) {
   }
 }
 
-/** Start the BullMQ worker. Side-effecting (opens Redis); called only when this
- *  module is run directly (`node src/worker.js`), so requiring it for unit tests
- *  never touches Redis. */
-function start() {
+// Build a BullMQ Worker for one tenant's queue. Each tenant has its own queue
+// (receipts:<tenant>) so a tenant's jobs are isolated; the dispatcher is shared
+// (receiptIds are composite, so the services resolve scope from the id itself).
+function makeTenantWorker(tenantId) {
   const connection = createConnection();
-  const worker = new Worker(config.queueName, dispatch, {
+  const worker = new Worker(queueNameFor(tenantId), dispatch, {
     connection,
     concurrency: config.queueConcurrency,
   });
 
   worker.on('completed', (job) => {
-    logger.info({ jobId: job.id, name: job.name, receiptId: job.data.receiptId }, 'job completed');
+    logger.info({ tenantId, jobId: job.id, name: job.name, receiptId: job.data.receiptId }, 'job completed');
   });
 
   worker.on('failed', async (job, err) => {
     logger.error(
-      { jobId: job?.id, name: job?.name, receiptId: job?.data?.receiptId, attempt: job?.attemptsMade, err: err.message },
+      { tenantId, jobId: job?.id, name: job?.name, receiptId: job?.data?.receiptId, attempt: job?.attemptsMade, err: err.message },
       'job failed'
     );
     // On the final attempt of a processing job, mark the durable record failed.
@@ -67,20 +69,49 @@ function start() {
     }
   });
 
-  logger.info(
-    { queue: config.queueName, concurrency: config.queueConcurrency, ocr: config.ocrProvider },
-    'worker started'
-  );
+  logger.info({ tenantId, queue: queueNameFor(tenantId), concurrency: config.queueConcurrency }, 'tenant worker started');
+  return worker;
+}
+
+/** Start the BullMQ worker(s). Side-effecting (opens Redis); called only when
+ *  this module is run directly (`node src/worker.js`), so requiring it for unit
+ *  tests never touches Redis. Runs one Worker per registered tenant queue and
+ *  polls the tenant registry so tenants onboarded at runtime are picked up. */
+function start() {
+  const workers = new Map(); // tenantId -> Worker
+  const watchMs = Number(process.env.TENANT_WATCH_MS) || 5000;
+
+  // Add Workers for any registered tenants we aren't yet consuming.
+  async function sync() {
+    try {
+      for (const tenantId of await tenants.list()) {
+        if (!workers.has(tenantId)) workers.set(tenantId, makeTenantWorker(tenantId));
+      }
+    } catch (err) {
+      logger.warn({ err: err.message }, 'tenant queue sync failed');
+    }
+  }
+
+  let timer = null;
+  (async () => {
+    await tenants.ensureDefault(); // the default tenant always has a queue
+    await sync();
+    timer = setInterval(sync, watchMs);
+    timer.unref();
+  })();
+
+  logger.info({ ocr: config.ocrProvider, watchMs }, 'worker started (per-tenant queues)');
 
   function shutdown(sig) {
     logger.info({ sig }, 'shutting down worker');
-    worker.close().then(() => process.exit(0));
+    if (timer) clearInterval(timer);
+    Promise.all([...workers.values()].map((w) => w.close())).then(() => process.exit(0));
     setTimeout(() => process.exit(0), 8000).unref();
   }
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  return worker;
+  return { workers, sync };
 }
 
 if (require.main === module) start();

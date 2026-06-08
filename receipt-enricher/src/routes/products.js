@@ -11,6 +11,7 @@ const productCache = require('../products/productCache');
 const registry = require('../products/registry');
 const { resolveProductsForProfileResult } = require('../products/resolveService');
 const { enqueueResolveProducts } = require('../queue');
+const identity = require('../identity');
 const view = require('../web/view');
 const logger = require('../logger');
 
@@ -52,6 +53,9 @@ router.get('/api/productResolvers', (req, res) => {
 });
 
 // --- Live lookup monitor (technical console) ---------------------------------
+// NOTE: the product cache and its event log are GLOBAL (shared across tenants) —
+// a SKU's product identity is the same for everyone — so these endpoints are not
+// tenant-scoped, by design.
 
 // JSON feed for /products/monitor: recent per-lookup events (newest first) plus
 // a summary over the returned window. Polled by the monitor page every few sec.
@@ -83,8 +87,8 @@ router.get('/products/monitor', serveMonitor);
 router.get('/observe/cache/products', serveMonitor);
 
 // --- Products cache: export / import (admin) ---------------------------------
-// The product cache is shared Redis state. These endpoints snapshot it to a
-// portable JSON document and restore it — e.g. seed a known cache before an
+// The product cache is shared, GLOBAL Redis state. These endpoints snapshot it
+// to a portable JSON document and restore it — e.g. seed a known cache before an
 // acceptance run so SKU lookups are served from cache instead of live Anthropic
 // calls (a parallel, offline path to the resolver). The `products` CLI wraps
 // these. The monitor's event log (products:events*) is never included.
@@ -131,6 +135,7 @@ router.post('/api/products/cache/import', async (req, res, next) => {
 });
 
 // --- Resolve products from a receipt's profile result ------------------------
+// Receipt-scoped: tenant is derived FROM the receipt id (composite).
 
 // Map a profile result's line items to products. Synchronous by default.
 // ?dryRun=1 resolves and returns without persisting. ?async=1 enqueues a
@@ -141,7 +146,8 @@ router.post('/api/receipts/:id/profileResults/:profileId/resolveProducts', async
     if (req.query.async && !req.query.dryRun) {
       const record = await store.get(req.params.id);
       if (!record) return res.status(404).json({ error: 'receipt not found' });
-      const profile = await profileStore.get(req.params.profileId);
+      const { tenantId } = identity.scopeOf(record.id);
+      const profile = await profileStore.get(req.params.profileId, { tenantId });
       if (!profile) return res.status(404).json({ error: 'profile not found' });
       const profileResult = await profileResultStore.get(record.id, profile.id);
       if (!profileResult) {
@@ -169,10 +175,11 @@ router.post('/api/receipts/:id/profileResults/:profileId/resolveProducts', async
 
 // --- Read product results ----------------------------------------------------
 
-// Every product result across all receipts (newest first).
+// Every product result for the requesting identity (newest first).
 router.get('/api/products', async (req, res, next) => {
   try {
-    res.json(await productStore.listAll());
+    const { tenantId, userId } = identity.resolveIdentity(req);
+    res.json(await productStore.listAll({ tenantId, userId }));
   } catch (err) {
     next(err);
   }
@@ -190,10 +197,13 @@ router.get('/api/receipts/:id/products', async (req, res, next) => {
 
 router.get('/api/receipts/:id/products/:profileId', async (req, res, next) => {
   try {
+    const record = await store.get(req.params.id);
+    if (!record) return res.status(404).json({ error: 'not found' });
     // Accept profile id or name; results are keyed by id, so resolve a name.
-    const profile = await profileStore.get(req.params.profileId);
+    const { tenantId } = identity.scopeOf(record.id);
+    const profile = await profileStore.get(req.params.profileId, { tenantId });
     const profileId = profile ? profile.id : req.params.profileId;
-    const result = await productStore.get(req.params.id, profileId);
+    const result = await productStore.get(record.id, profileId);
     if (!result) return res.status(404).json({ error: 'not found' });
     res.json(result);
   } catch (err) {
@@ -203,10 +213,11 @@ router.get('/api/receipts/:id/products/:profileId', async (req, res, next) => {
 
 // --- Web views ---------------------------------------------------------------
 
-// HTML list of every product result across all receipts.
+// HTML list of every product result for the requesting identity.
 router.get('/products', async (req, res, next) => {
   try {
-    res.type('html').send(view.renderProductList(await productStore.listAll()));
+    const { tenantId, userId } = identity.resolveIdentity(req);
+    res.type('html').send(view.renderProductList(await productStore.listAll({ tenantId, userId })));
   } catch (err) {
     next(err);
   }
@@ -219,7 +230,8 @@ router.get('/receipts/:id/products/:profileId/view', async (req, res, next) => {
   try {
     const record = await store.get(req.params.id);
     if (!record) return res.status(404).send('Receipt not found');
-    const profile = await profileStore.get(req.params.profileId);
+    const { tenantId } = identity.scopeOf(record.id);
+    const profile = await profileStore.get(req.params.profileId, { tenantId });
     const profileId = profile ? profile.id : req.params.profileId;
     const result = await productStore.get(record.id, profileId);
     if (!result) {

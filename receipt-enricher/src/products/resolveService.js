@@ -12,6 +12,7 @@ const config = require('../config');
 const store = require('../store');
 const profileStore = require('../receiptProfiles/profileStore');
 const resultStore = require('../receiptProfiles/resultStore');
+const identity = require('../identity');
 const registry = require('./registry');
 const productStore = require('./productStore');
 const productCache = require('./productCache');
@@ -73,7 +74,9 @@ async function resolveProductsForProfileResult(receiptId, profileId, { dryRun = 
   const record = await store.get(receiptId);
   if (!record) throw new ResolveError(404, 'receipt not found');
 
-  const profile = await profileStore.get(profileId);
+  // Profiles are tenant-scoped; resolve within the receipt's tenant.
+  const { tenantId } = identity.scopeOf(record.id);
+  const profile = await profileStore.get(profileId, { tenantId });
   if (!profile) throw new ResolveError(404, 'profile not found');
 
   const profileResult = await resultStore.get(record.id, profile.id);

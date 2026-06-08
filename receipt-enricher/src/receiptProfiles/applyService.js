@@ -10,6 +10,7 @@ const store = require('../store');
 const profileStore = require('./profileStore');
 const resultStore = require('./resultStore');
 const registry = require('./registry');
+const identity = require('../identity');
 const { applyProfile } = require('./engine');
 const logger = require('../logger');
 
@@ -34,7 +35,9 @@ class ApplyError extends Error {
 async function applyProfileToReceipt(receiptId, profileId, { dryRun = false } = {}) {
   const record = await store.get(receiptId);
   if (!record) throw new ApplyError(404, 'receipt not found');
-  const profile = await profileStore.get(profileId);
+  // Profiles are tenant-scoped; resolve within the receipt's tenant.
+  const { tenantId } = identity.scopeOf(record.id);
+  const profile = await profileStore.get(profileId, { tenantId });
   if (!profile) throw new ApplyError(404, 'profile not found');
 
   const transformer = registry.get(profile.transformer);

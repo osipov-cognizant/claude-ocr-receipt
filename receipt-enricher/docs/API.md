@@ -11,11 +11,48 @@ browser views.
   (the acceptance suite publishes `18080`), point `PUBLIC_BASE_URL` there or the
   returned links won't resolve.
 - **Auth:** none. Run it on a trusted network or behind a reverse proxy.
+- **Identity:** every resource is scoped to a **(tenant, user)** pair — see
+  [Identity & multi-tenancy](#identity--multi-tenancy) below.
 - **Content types:** JSON for the API, `multipart/form-data` for uploads,
   `text/html` for the views.
 
 ```bash
 BASE=http://localhost:8080      # or: API_URL for the CLI / a remote host
+```
+
+---
+
+## Identity & multi-tenancy
+
+Every resource is owned by an identity: a **(tenantId, userId)** pair. A
+resource's public id is the **composite id** `"<tenant>:<user>:<cacheId>"`
+(e.g. `main:main:1b70d95bbd9f462f`) — self-describing, so once you have an id you
+can read it back with no extra headers. Segments are a flexible string
+(`[A-Za-z0-9_-]{1,64}`: UUIDs, `main`, etc.).
+
+- **Where identity comes from.** On **upload** (and on collection endpoints like
+  `GET /api/receipts`), identity is taken from the `X-Tenant-Id` / `X-User-Id`
+  request headers (or `tenantId`/`userId` form fields), falling back to the
+  server defaults `DEFAULT_TENANT_ID` / `DEFAULT_USER_ID` (default `main`/`main`).
+  Set those env vars **empty** to run strict multi-tenant — then every request
+  must send the headers, and one that doesn't gets `400`.
+- **Tenants are accounts.** An upload for a tenant that hasn't been provisioned
+  is rejected (`400 unknown tenant "x"`). Create one with
+  [`POST /api/tenants`](#tenant-accounts) first; the default tenant is
+  auto-provisioned at boot.
+- **Isolation.** Receipts, profile results and product results are stored per
+  tenant **and** user (`DATA_DIR/<tenant>/<user>/…`); profile *definitions* are
+  per tenant (`DATA_DIR/<tenant>/receiptProfiles`). The enrichment cache is
+  per-tenant; the product (SKU→product) cache and its monitor are **global**
+  (shared across tenants — a SKU's product identity is the same for everyone).
+- **Scope follows the id.** Receipt-scoped routes (`…/receipts/:id/…`) derive the
+  tenant/user from the composite `:id`, so they need no headers.
+
+```bash
+# Provision a tenant, then upload under it for a specific user:
+curl -fsS -X POST "$BASE/api/tenants" -H 'content-type: application/json' -d '{"tenantId":"acme"}'
+curl -fsS -H 'X-Tenant-Id: acme' -H 'X-User-Id: alice' -F "receipt=@r.jpg" "$BASE/api/receipts"
+# -> id like "acme:alice:1b70d95bbd9f462f"
 ```
 
 ---
@@ -46,8 +83,10 @@ queued  ──►  processing  ──►  done
 | Method | Path | Purpose | Returns |
 |--------|------|---------|---------|
 | `GET`  | `/health` | Liveness + Redis/config status | JSON |
-| `POST` | `/api/receipts` | Upload a receipt image (enqueues processing; optional `profileId` applies a profile after OCR, then resolves products by default — `resolveProducts=0` opts out) | `202` JSON |
-| `GET`  | `/api/receipts` | List recent receipts (`?limit=`, max 500) | JSON array |
+| `GET`  | `/api/tenants` | List provisioned tenants (+ the default) | JSON |
+| `POST` | `/api/tenants` | Provision a tenant account (idempotent) | `201`/`200` JSON |
+| `POST` | `/api/receipts` | Upload a receipt image (enqueues processing; `X-Tenant-Id`/`X-User-Id` set the owner; optional `profileId` applies a profile after OCR, then resolves products by default — `resolveProducts=0` opts out) | `202` JSON |
+| `GET`  | `/api/receipts` | List the identity's recent receipts (`?limit=`, max 500) | JSON array |
 | `GET`  | `/api/receipts/:id` | Full record for one receipt | JSON |
 | `GET`  | `/receipts/:id/view` | Human-readable HTML view | HTML |
 | `GET`  | `/receipts/:id/image` | The original uploaded photo | image bytes |
@@ -94,12 +133,32 @@ curl -fsS "$BASE/health" | jq .
   "redis": "up",
   "ocrProvider": "vision",
   "enrichment": "disabled",
+  "tenants": 1,
+  "defaultTenant": "main",
   "receiptProfiles": 1,
   "products": { "enabled": true, "resolver": "anthropic" },
   "time": "2026-06-03T20:00:00.000Z"
 }
 ```
 Returns `200` when Redis is reachable, `503` (`status: "degraded"`) otherwise.
+`receiptProfiles` counts the **default tenant's** profiles.
+
+### Tenant accounts
+
+Tenants are explicitly provisioned (an upload for an unknown tenant is rejected).
+Provisioning also seeds the tenant's example profiles and makes the worker start
+consuming its queue. The default tenant is auto-provisioned at boot.
+
+```bash
+curl -fsS "$BASE/api/tenants" | jq .
+# { "default": "main", "tenants": ["acme", "main"] }
+
+curl -fsS -X POST "$BASE/api/tenants" -H 'content-type: application/json' -d '{"tenantId":"acme"}'
+# 201 { "tenantId": "acme", "created": true, "seededProfiles": 2 }   (200/created:false if it already existed)
+```
+
+A `tenantId` must match `[A-Za-z0-9_-]{1,64}` or the call returns `400`. The CLI
+wraps this: `receipts tenant create acme` / `receipts tenant list`.
 
 ### `POST /api/receipts`
 
@@ -107,6 +166,11 @@ Multipart upload. The file field may be named **`receipt`** (preferred),
 `file`, or `image`. Optional text field `source` tags the origin (`api`, `cli`,
 `telegram`, …). Max size: `MAX_UPLOAD_MB` (default 15 MB). Only `image/*` types
 are accepted.
+
+The owning identity comes from the `X-Tenant-Id` / `X-User-Id` headers (or
+`tenantId`/`userId` form fields), defaulting to `DEFAULT_TENANT_ID`/
+`DEFAULT_USER_ID`. The returned `id` is the **composite** id
+`"<tenant>:<user>:<cacheId>"`. An unknown (unprovisioned) tenant returns `400`.
 
 Optional text field **`profileId`** (a profile id or name) applies a
 [Receipt Profile](#receipt-profiles) right after OCR — the worker runs the
@@ -130,13 +194,13 @@ curl -fsS \
 ```
 ```json
 {
-  "id": "1b70d95bbd9f462f",
+  "id": "main:main:1b70d95bbd9f462f",
   "status": "queued",
   "profileId": "rp_9f3c1a2b4d5e6f70",
-  "profileResultUrl": "http://localhost:8080/api/receipts/1b70d95bbd9f462f/profileResults/rp_9f3c1a2b4d5e6f70",
-  "productsUrl": "http://localhost:8080/api/receipts/1b70d95bbd9f462f/products/rp_9f3c1a2b4d5e6f70",
-  "statusUrl": "http://localhost:8080/api/receipts/1b70d95bbd9f462f",
-  "viewUrl": "http://localhost:8080/receipts/1b70d95bbd9f462f/view"
+  "profileResultUrl": "http://localhost:8080/api/receipts/main:main:1b70d95bbd9f462f/profileResults/rp_9f3c1a2b4d5e6f70",
+  "productsUrl": "http://localhost:8080/api/receipts/main:main:1b70d95bbd9f462f/products/rp_9f3c1a2b4d5e6f70",
+  "statusUrl": "http://localhost:8080/api/receipts/main:main:1b70d95bbd9f462f",
+  "viewUrl": "http://localhost:8080/receipts/main:main:1b70d95bbd9f462f/view"
 }
 ```
 Responds `202 Accepted` immediately; processing happens asynchronously. Without
@@ -409,8 +473,9 @@ their raw `rp_…` id. The HTML list at `/profileResults` links each row to its
 per-result `…/view`; the profile badge on each row links to that profile's
 filtered list.
 
-> Profiles and results are durable JSON under `DATA_DIR/receiptProfiles/` and
-> `DATA_DIR/profileResults/<receiptId>/`. Applying a profile is **synchronous by
+> Profile definitions are durable JSON per tenant under
+> `DATA_DIR/<tenant>/receiptProfiles/`; results are per tenant/user under
+> `DATA_DIR/<tenant>/<user>/profileResults/<cacheId>/`. Applying a profile is **synchronous by
 > default** (the transform is pure and fast); pass `?async=1` to run it on the
 > worker, or set a `profileId` at upload time to chain it after OCR via a flow.
 
@@ -490,7 +555,7 @@ curl -fsS "$BASE/api/products"                             # every product resul
 open  "$BASE/products"                                      # HTML list of all product results
 ```
 
-> Product results are durable JSON under `DATA_DIR/products/<receiptId>/`. Unlike
+> Product results are durable JSON under `DATA_DIR/<tenant>/<user>/products/<cacheId>/`. Unlike
 > the profile view, the HTML product view renders only a **stored** result (it
 > won't resolve fresh on a miss, since resolution makes live backend calls).
 > Configure with `PRODUCT_RESOLVER`, `PRODUCT_ANTHROPIC_MODEL`,
@@ -552,4 +617,6 @@ a missing `ttlSeconds` falls back to `PRODUCT_CACHE_TTL_SECONDS`. Response:
   `VISION_PROVIDER=openai`) reads layout and returns clean items; with no key it
   falls back to offline Tesseract OCR (best on an upright, sharp photo).
 - **No HEIC**: convert iPhone HEIC photos to JPEG/PNG before uploading.
-- The id is a 16-char hex token; records are durable JSON files under `DATA_DIR`.
+- The id is the composite `"<tenant>:<user>:<cacheId>"` (the `cacheId` is a
+  16-char hex token); records are durable JSON files under
+  `DATA_DIR/<tenant>/<user>/`.
