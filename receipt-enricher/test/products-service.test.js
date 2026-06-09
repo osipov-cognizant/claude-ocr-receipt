@@ -134,6 +134,19 @@ test('disabled: all items skipped with null product fields', async () => {
   }
 });
 
+test('emoji from the resolver carries onto the product and persists', async () => {
+  const id = await seedProfileResult([{ description: 'KS EGGS', price: 4.99 }]);
+  behavior = (item) => ({ productTitle: `P:${item.description}`, productDescription: 'd', productUrl: 'https://x', emoji: '🥚', confidence: 0.5 });
+  try {
+    const out = await resolveProductsForProfileResult(id, profile.id);
+    assert.equal(out.products[0].emoji, '🥚');
+    const saved = await productStore.get(id, profile.id);
+    assert.equal(saved.products[0].emoji, '🥚', 'emoji persisted');
+  } finally {
+    behavior = (item) => ({ productTitle: `P:${item.description}`, productDescription: 'd', productUrl: 'https://x', confidence: 0.5 });
+  }
+});
+
 test('errors: unknown receipt -> 404, unknown profile -> 404, profile not applied -> 409', async () => {
   await assert.rejects(() => resolveProductsForProfileResult('nope', profile.id), (e) => e instanceof ResolveError && e.status === 404);
 

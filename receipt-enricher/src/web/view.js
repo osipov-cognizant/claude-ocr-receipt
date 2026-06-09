@@ -64,6 +64,7 @@ a:hover{text-decoration:underline}
 .item .thumb{width:64px; height:64px; flex:0 0 64px; border-radius:4px; object-fit:cover;
   background:var(--paper-2); border:1px solid var(--line)}
 .item .thumb.empty{display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:10px; text-align:center}
+.item .thumb.emoji{display:flex; align-items:center; justify-content:center; font-size:34px; line-height:1}
 .item .body{flex:1; min-width:0}
 .item .name{font-weight:700}
 .item .sub{color:var(--muted); font-size:12px; margin-top:2px}
@@ -198,10 +199,16 @@ function renderProfileResult(record, result) {
 
 // One resolved product row. The product title leads (falling back to the raw
 // line-item text); the source receipt line + price sit underneath, and the
-// substantiating link (productUrl) is appended to the description.
+// substantiating link (productUrl) is appended to the description. The 64px
+// image placeholder on the left shows the product's emoji (from the enrichment
+// lookup) when present, otherwise the same "no image" placeholder as the
+// receipt view — products carry no real image.
 function productRow(p) {
   const li = p.lineItem || {};
   const title = p.productTitle || li.description || '(unidentified)';
+  const thumb = p.emoji
+    ? `<div class="thumb emoji" role="img" aria-label="${esc(title)}">${esc(p.emoji)}</div>`
+    : `<div class="thumb empty">no image</div>`;
   const sub = [];
   if (p.brand) sub.push(esc(p.brand));
   if (p.category) sub.push(esc(p.category));
@@ -216,6 +223,7 @@ function productRow(p) {
       : '';
   const err = p.error ? `<div class="disc">resolve error: ${esc(p.error)}</div>` : '';
   return `<div class="item">
+    ${thumb}
     <div class="body">
       <div class="name">${esc(title)}</div>
       ${sub.length ? `<div class="sub">${sub.join(' · ')}</div>` : ''}

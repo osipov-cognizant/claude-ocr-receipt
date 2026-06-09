@@ -526,6 +526,7 @@ curl -fsS -X POST "$BASE/api/receipts/$ID/profileResults/usGrocery1/resolveProdu
       "productUrl": "https://www.costco.com/...",
       "brand": "Kirkland Signature",
       "category": "Beverages",
+      "emoji": "🥤",
       "confidence": 0.82,
       "error": null
     }
@@ -547,6 +548,12 @@ receipt (or in another session) is served without a backend call. `stats.cached`
 is a sub-count of `stats.resolved` reporting how many came from the cache
 (`resolved + skipped + errors` still equals the item count).
 
+Each resolved product also carries an `emoji` — a single emoji depicting the
+product (e.g. `🥚` for Kirkland eggs), requested in the same lookup call and
+rendered in the product view's image placeholder. It's on by default and
+optional: set `PRODUCT_EMOJI_ENABLED=0` and the resolver neither asks for nor
+stores an emoji (`emoji` is then `null`).
+
 ### Read products
 
 ```bash
@@ -563,7 +570,7 @@ open  "$BASE/products"                                      # HTML list of all p
 > Configure with `PRODUCT_RESOLVER`, `PRODUCT_ANTHROPIC_MODEL`,
 > `PRODUCT_ANTHROPIC_WEB_SEARCH`, `PRODUCT_MAX_ITEMS`, `PRODUCT_CONCURRENCY`,
 > `PRODUCT_CACHE_ENABLED`, `PRODUCT_CACHE_TTL_SECONDS`, `PRODUCT_RESOLVE_ON_UPLOAD`,
-> `PRODUCTS_ENABLED` (see the README Configuration reference).
+> `PRODUCT_EMOJI_ENABLED`, `PRODUCTS_ENABLED` (see the README Configuration reference).
 
 ### Live lookup monitor
 

@@ -431,7 +431,7 @@ register/seed the profile (see seeding above), not to change the upload.
 
 After a profile result exists, the **product resolver** maps each cleaned line
 item to product info: `productTitle`, `productDescription`, `productUrl` (the top
-substantiating web link), `brand`, `category`, `confidence`. The backend is a
+substantiating web link), `brand`, `category`, `emoji` (see below), `confidence`. The backend is a
 configurable **resolver adapter** chosen by config — exactly like `OCR_PROVIDER`
 picks the OCR engine, NOT a per-receipt record. This intentionally does **not**
 mirror receiptProfiles' CRUD model (there is no "product profile" object and no
@@ -454,6 +454,17 @@ per-item config).
   `data/products/<receiptId>/<profileId>.json`.
 - **Graceful degrade** (mirrors enrich): no key / disabled → items list with null
   product fields and `stats.skipped`; a per-item error is recorded in `error`.
+- **Product emoji (on by default, optional).** Each product also gets a single
+  meaningful `emoji` (🥚 for Kirkland eggs, 🥛 for milk), rendered in the product
+  view's 64px image placeholder (`.thumb.emoji` in `view.js`; products carry no
+  real image). It's requested in the SAME resolver call that identifies the
+  product — **zero extra backend calls**. Gated by `config.products.emoji`
+  (`PRODUCT_EMOJI_ENABLED`, default `1`): when off, `anthropic.js#buildSystem`
+  drops the emoji clause from the system prompt AND `resolve()` forces
+  `emoji:null`, so the flag is authoritative end-to-end. `normalizeEmoji()` only
+  accepts a short string containing a real `\p{Extended_Pictographic}` glyph
+  (rejects prose / `"none"` / `"N/A"`), so junk never reaches the view. The emoji
+  rides in the shared product cache value like the other fields.
 
 **Run it.** Three paths, mirroring profiles:
 - At upload: **on by default** whenever a profile is applied
@@ -475,8 +486,9 @@ per-item config).
 `maxItems` (`PRODUCT_MAX_ITEMS`, default 100), `concurrency` (`PRODUCT_CONCURRENCY`,
 default 5), `cacheEnabled`/`cacheTtlSeconds` (`PRODUCT_CACHE_ENABLED`,
 `PRODUCT_CACHE_TTL_SECONDS`, default 30d), `eventsMax` (`PRODUCT_EVENTS_MAX`,
-default 500), `resolveOnUpload`, and an `anthropic` block reusing the vision
-Anthropic creds. `/health` includes `products: { enabled, resolver }`.
+default 500), `resolveOnUpload`, `emoji` (`PRODUCT_EMOJI_ENABLED`, default on),
+and an `anthropic` block reusing the vision Anthropic creds. `/health` includes
+`products: { enabled, resolver, emoji }`.
 
 **Gotcha — web tools on Haiku need `allowed_callers: ['direct']`.** The
 `web_search_20260209`/`web_fetch_20260209` tools default to the *programmatic

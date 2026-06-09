@@ -12,9 +12,10 @@ useTempDataDir('products-resolver-test');
 
 const resolver = require('../src/products/resolvers/anthropic');
 
-function cfg({ webSearch = true } = {}) {
+function cfg({ webSearch = true, emoji = true } = {}) {
   return {
     products: {
+      emoji,
       anthropic: {
         apiKey: 'test-key',
         model: 'claude-haiku-4-5',
@@ -32,6 +33,7 @@ const PRODUCT_JSON = JSON.stringify({
   productUrl: 'https://www.costco.com/kirkland-sparkling-water.html',
   brand: 'Kirkland Signature',
   category: 'Beverages',
+  emoji: '🥤',
   confidence: 0.82,
 });
 
@@ -140,4 +142,58 @@ test('resolve throws on a non-ok API response', async () => {
 test('normalize returns null when title/description/url are all empty', () => {
   assert.equal(resolver.normalize({ brand: 'x', confidence: 0.1 }), null);
   assert.ok(resolver.normalize({ productTitle: 'X' }));
+});
+
+test('normalizeEmoji keeps a real emoji and rejects prose/placeholders', () => {
+  assert.equal(resolver.normalizeEmoji('🥚'), '🥚');
+  assert.equal(resolver.normalizeEmoji(' 🥛 '), '🥛'); // trims
+  assert.equal(resolver.normalizeEmoji('👨‍🍳'), '👨‍🍳'); // ZWJ sequence kept
+  assert.equal(resolver.normalizeEmoji('none'), null);
+  assert.equal(resolver.normalizeEmoji('N/A'), null);
+  assert.equal(resolver.normalizeEmoji('a long sentence with no emoji'), null);
+  assert.equal(resolver.normalizeEmoji(''), null);
+  assert.equal(resolver.normalizeEmoji(null), null);
+  assert.equal(resolver.normalizeEmoji(42), null);
+});
+
+test('normalize carries a valid emoji through', () => {
+  assert.equal(resolver.normalize({ productTitle: 'Eggs', emoji: '🥚' }).emoji, '🥚');
+  assert.equal(resolver.normalize({ productTitle: 'Eggs', emoji: 'nope' }).emoji, null);
+  assert.equal(resolver.normalize({ productTitle: 'Eggs' }).emoji, null);
+});
+
+test('buildSystem asks for an emoji only when the feature is enabled', () => {
+  const on = resolver.buildSystem(cfg({ emoji: true }));
+  assert.match(on, /"emoji"/);
+  assert.match(on, /SINGLE emoji/);
+  const off = resolver.buildSystem(cfg({ emoji: false }));
+  assert.doesNotMatch(off, /emoji/i);
+});
+
+test('resolve returns the emoji when the feature is on', async () => {
+  const restore = stubFetch((url, opts) => {
+    const body = JSON.parse(opts.body);
+    assert.match(body.system, /"emoji"/); // prompted for it
+    return jsonResponse({ stop_reason: 'end_turn', content: [{ type: 'text', text: PRODUCT_JSON }] });
+  });
+  try {
+    const out = await resolver.resolve({ description: 'KS SPARK WAT' }, { config: cfg({ emoji: true }) });
+    assert.equal(out.emoji, '🥤');
+  } finally {
+    restore();
+  }
+});
+
+test('resolve drops the emoji when the feature is off, even if volunteered', async () => {
+  const restore = stubFetch((url, opts) => {
+    const body = JSON.parse(opts.body);
+    assert.doesNotMatch(body.system, /emoji/i); // not prompted for
+    return jsonResponse({ stop_reason: 'end_turn', content: [{ type: 'text', text: PRODUCT_JSON }] });
+  });
+  try {
+    const out = await resolver.resolve({ description: 'KS SPARK WAT' }, { config: cfg({ emoji: false }) });
+    assert.equal(out.emoji, null);
+  } finally {
+    restore();
+  }
 });

@@ -332,6 +332,7 @@ All via `.env` (see `.env.example`). Highlights:
 | `PRODUCT_CACHE_TTL_SECONDS` | `2592000`         | how long a cached product lookup lives (default 30 days) |
 | `PRODUCT_EVENTS_MAX` | `500`                    | size of the per-lookup event buffer behind `/products/monitor` (0 disables) |
 | `PRODUCT_RESOLVE_ON_UPLOAD` | `true`            | resolve products on upload whenever a profile is applied (opt out per-upload with `resolveProducts=0`) |
+| `PRODUCT_EMOJI_ENABLED` | `true`                | map each product to a meaningful emoji (e.g. 🥚 for eggs) in the same lookup, shown in the product view's image placeholder; `0` disables it |
 | `TELEGRAM_BOT_TOKEN` | —                        | enables the bot service                      |
 
 Inside compose, `REDIS_URL` and `DATA_DIR` are set for you. The compose file also

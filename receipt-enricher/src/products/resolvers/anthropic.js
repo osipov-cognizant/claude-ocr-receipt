@@ -15,7 +15,12 @@
 const config = require('../../config');
 const logger = require('../../logger');
 
-const SYSTEM_PROMPT = `You are a product-research assistant for a grocery receipt app.
+// The system prompt is built per-call because the emoji field is optional
+// (config.products.emoji): when off we don't ask for it at all, so there's no
+// behavior change and no wasted tokens. The base prompt is otherwise constant.
+function buildSystem(cfg) {
+  const emoji = !!(cfg && cfg.products && cfg.products.emoji);
+  return `You are a product-research assistant for a grocery receipt app.
 You are given a SINGLE receipt line item — possibly noisy or abbreviated (e.g. "KS SPARK WAT", "5DZ EGGS") — and possibly the store name and the price paid.
 Identify the real retail product the line refers to, then respond with ONLY a JSON object (no markdown, no commentary) of exactly this shape:
 
@@ -24,14 +29,25 @@ Identify the real retail product the line refers to, then respond with ONLY a JS
   "productDescription": string | null,  // 1-3 sentences describing the product
   "productUrl": string | null,          // the single best web page that substantiates this product
   "brand": string | null,
-  "category": string | null,            // e.g. "Beverages", "Dairy", "Produce"
+  "category": string | null,            // e.g. "Beverages", "Dairy", "Produce"${
+    emoji
+      ? `
+  "emoji": string | null,               // ONE emoji that best represents the product (see rules)`
+      : ''
+  }
   "confidence": number                  // 0..1, your confidence this is the right product
 }
 
 Rules:
 - "productUrl" must be the ONE link that best substantiates the product (a retailer or manufacturer product page preferred). Return the actual URL you found, never a guessed or placeholder URL.
-- Use the store name and price (when provided) to disambiguate — a store-brand abbreviation usually maps to that store's house brand.
+- Use the store name and price (when provided) to disambiguate — a store-brand abbreviation usually maps to that store's house brand.${
+    emoji
+      ? `
+- "emoji" must be a SINGLE emoji that most meaningfully depicts the product (e.g. 🥚 for eggs, 🥛 for milk, 🍌 for bananas, 🧻 for paper towels). Pick the most specific food/grocery emoji that fits; use null only if nothing reasonably represents it. Never return more than one emoji or any text.`
+      : ''
+  }
 - If you cannot confidently identify a product, set the unknown fields to null and "confidence" to a low value. Never invent a product or a URL.`;
+}
 
 /**
  * Build the user-turn prompt, customized to the fields actually present. The
@@ -89,6 +105,18 @@ function textFrom(content) {
     .join('\n');
 }
 
+// Accept only a short string that actually contains a pictographic emoji, so a
+// stray sentence or placeholder ("none", "N/A") can never leak into the view.
+// ZWJ sequences (e.g. 👨‍🍳) push the code-unit length up, so allow a little room
+// while still rejecting prose.
+function normalizeEmoji(v) {
+  if (typeof v !== 'string') return null;
+  const t = v.trim();
+  if (!t || t.length > 16) return null;
+  if (!/\p{Extended_Pictographic}/u.test(t)) return null;
+  return t;
+}
+
 /** Normalize the model's JSON into ProductFields (tolerant of missing keys). */
 function normalize(parsed) {
   if (!parsed || typeof parsed !== 'object') return null;
@@ -100,6 +128,7 @@ function normalize(parsed) {
     productUrl: str(parsed.productUrl),
     brand: str(parsed.brand),
     category: str(parsed.category),
+    emoji: normalizeEmoji(parsed.emoji),
     confidence: num(parsed.confidence),
   };
   // Nothing usable came back.
@@ -118,6 +147,8 @@ async function resolve(item, ctx) {
   const cfg = (ctx && ctx.config) || config;
   const { apiKey, model, version, baseUrl } = cfg.products.anthropic;
   const tools = buildTools(cfg);
+  const system = buildSystem(cfg);
+  const emojiEnabled = !!(cfg.products && cfg.products.emoji);
 
   let messages = [{ role: 'user', content: buildUserPrompt(item, ctx) }];
 
@@ -125,7 +156,7 @@ async function resolve(item, ctx) {
     const body = {
       model,
       max_tokens: 2048,
-      system: SYSTEM_PROMPT,
+      system,
       messages,
     };
     if (tools.length) body.tools = tools;
@@ -151,7 +182,11 @@ async function resolve(item, ctx) {
       messages = [...messages, { role: 'assistant', content: data.content }];
       continue;
     }
-    return normalize(safeJson(textFrom(data.content)));
+    const fields = normalize(safeJson(textFrom(data.content)));
+    // The flag is authoritative: drop any emoji the model volunteered when the
+    // feature is off, so toggling it cleanly disables the field end-to-end.
+    if (fields && !emojiEnabled) fields.emoji = null;
+    return fields;
   }
 
   // Exhausted continuations without a final answer.
@@ -169,8 +204,10 @@ module.exports = {
   ready: (cfg) => !!((cfg || config).products.anthropic.apiKey),
   resolve,
   // exported for unit tests
+  buildSystem,
   buildUserPrompt,
   buildTools,
   safeJson,
   normalize,
+  normalizeEmoji,
 };

@@ -56,6 +56,7 @@ function createApp() {
       products: {
         enabled: config.products.enabled,
         resolver: config.products.resolver,
+        emoji: config.products.emoji,
       },
       time: new Date().toISOString(),
     });

@@ -38,7 +38,7 @@ async function mapWithConcurrency(arr, limit, fn) {
 // The shape pushed for an item that wasn't resolved (skipped, disabled, capped,
 // or errored). `error` is the only field that ever varies.
 function nullProduct(lineItem, error = null) {
-  return { lineItem, productTitle: null, productDescription: null, productUrl: null, brand: null, category: null, confidence: null, error };
+  return { lineItem, productTitle: null, productDescription: null, productUrl: null, brand: null, category: null, emoji: null, confidence: null, error };
 }
 
 // Error with an HTTP-ish status so the sync route can map it; the worker lets it

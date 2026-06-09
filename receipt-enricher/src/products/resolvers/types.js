@@ -35,6 +35,7 @@
  * @property {string|null} productUrl        the top web link substantiating the item
  * @property {string|null} [brand]
  * @property {string|null} [category]
+ * @property {string|null} [emoji]           a single emoji depicting the product (config.products.emoji; null when off/none)
  * @property {number|null} [confidence]      0..1, resolver's own confidence
  */
 

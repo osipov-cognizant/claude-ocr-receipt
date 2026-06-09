@@ -13,6 +13,8 @@ assert_eq       "GET /health: status ok"      "ok"  "$(jq -r '.status' "$body")"
 assert_eq       "GET /health: redis up"       "up"  "$(jq -r '.redis' "$body")"
 assert_nonempty "GET /health: ocrProvider"    "$(jq -r '.ocrProvider' "$body")"
 assert_eq       "GET /health: persistence backend" "$RE_TEST_PERSISTENCE" "$(jq -r '.persistence' "$body")"
+# Product emoji mapping is on by default (PRODUCT_EMOJI_ENABLED unset).
+assert_eq       "GET /health: products.emoji on"  "true" "$(jq -r '.products.emoji' "$body")"
 rm -f "$body"
 
 report

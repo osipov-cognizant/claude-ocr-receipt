@@ -171,6 +171,39 @@ test('renderList renders rows for each receipt and an empty state', () => {
   assert.ok(empty.includes('No receipts yet'), 'empty list state');
 });
 
+function sampleProductResult(overrides = {}) {
+  return {
+    receiptId: 'abc123def4567890',
+    receiptProfileId: 'rp_1',
+    receiptProfileName: 'usGrocery1',
+    resolver: 'anthropic',
+    model: 'claude-haiku-4-5',
+    store: { name: 'Costco', date: '2026-05-26' },
+    stats: { resolved: 2, skipped: 0, cached: 0, errors: 0 },
+    products: [
+      { lineItem: { description: 'KS EGGS', price: 4.99 }, productTitle: 'Kirkland Eggs', productDescription: 'Eggs.', productUrl: 'https://x', emoji: '🥚', confidence: 0.9, error: null },
+      { lineItem: { description: 'MYSTERY ITEM', price: 1.0 }, productTitle: null, productDescription: null, productUrl: null, emoji: null, confidence: null, error: null },
+    ],
+    ...overrides,
+  };
+}
+
+test('renderProductResult shows the product emoji in the image placeholder', () => {
+  const html = view.renderProductResult(sampleRecord(), sampleProductResult());
+  assert.match(html, /class="thumb emoji"[^>]*>🥚</, 'emoji rendered in the thumb');
+  assert.ok(html.includes('Kirkland Eggs'));
+  // The item without an emoji falls back to the same "no image" placeholder.
+  assert.match(html, /class="thumb empty">no image</);
+});
+
+test('renderProductResult escapes an emoji aria-label drawn from product text', () => {
+  const result = sampleProductResult({
+    products: [{ lineItem: { description: 'x' }, productTitle: '<script>', emoji: '🥚', error: null }],
+  });
+  const html = view.renderProductResult(sampleRecord(), result);
+  assert.ok(!html.includes('<script>'), 'product title is escaped in the aria-label');
+});
+
 test('esc handles null/undefined without throwing', () => {
   assert.equal(view.esc(null), '');
   assert.equal(view.esc(undefined), '');

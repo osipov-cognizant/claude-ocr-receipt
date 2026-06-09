@@ -65,6 +65,13 @@ info "resolve tally: $(jq -rc '.stats' "$body")"
 code="$(curl -sS -o "$body" -w '%{http_code}' "$RE_TEST_BASE/api/receipts/$id/products/$PROFILE")"
 assert_http   "GET persisted products -> 200"     "200" "$code"
 assert_eq     "persisted product count"           "$items" "$(jq -r '.products|length' "$body")"
+# Every product carries the emoji field (structural; value may be null when the
+# feature is off or no emoji fit). Under the vision path (key present) at least
+# one resolved product should map to a real emoji.
+assert_eq     "every product has an emoji field"  "$items" "$(jq -r '[.products[]|select(has("emoji"))]|length' "$body")"
+if [ "$RE_TEST_OCR" = "vision" ]; then
+  assert_num_gt "at least one product mapped to an emoji" "$(jq -r '[.products[]|select(.emoji!=null)]|length' "$body")" "0"
+fi
 
 # --- per-receipt + cross-receipt listings ----------------------------------
 assert_num_gt "per-receipt product results"       "$(curl -fsS "$RE_TEST_BASE/api/receipts/$id/products" | jq -r 'length')" "0"
@@ -86,7 +93,7 @@ step_banner "Products (from profile '$PROFILE')"
 jq -r '
   "Store: \(.store.name // "(unknown)")   resolver: \(.resolver) [\(.model // "—")]",
   "--------------------------------------------------",
-  (.products[]? | "  • " + (.productTitle // ("(unresolved) " + (.lineItem.description // "?")))
+  (.products[]? | "  \(.emoji // "·") " + (.productTitle // ("(unresolved) " + (.lineItem.description // "?")))
      + (if .productUrl then "\n      ↳ \(.productUrl)" else "" end)
      + (if .error then "\n      ! \(.error)" else "" end)),
   "--------------------------------------------------",

@@ -179,6 +179,13 @@ const config = {
     // (opt out per-upload with resolveProducts=0). Products require a profile,
     // so an upload with no profile (and no DEFAULT_PROFILE_ID) still won't resolve.
     resolveOnUpload: bool(process.env.PRODUCT_RESOLVE_ON_UPLOAD, true),
+    // Map each resolved product to a single, meaningful emoji (e.g. 🥚 for
+    // Kirkland eggs) during the product-enrichment lookup, rendered in the
+    // product view's image placeholder. ON by default but optional: when off,
+    // the resolver neither asks for nor stores an emoji (no extra prompt, no
+    // behavior change for existing data). It costs nothing extra — the emoji is
+    // requested in the SAME backend call that identifies the product.
+    emoji: bool(process.env.PRODUCT_EMOJI_ENABLED, true),
     anthropic: {
       // Reuses the same Anthropic credentials/endpoint as the vision OCR path.
       apiKey: process.env.ANTHROPIC_API_KEY || '',
